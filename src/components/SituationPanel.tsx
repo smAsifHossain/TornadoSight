@@ -11,7 +11,7 @@ import type { Alert } from '../lib/nws';
  * grounds to trust or overrule it.
  */
 
-const TREND_COPY: Record<Situation['trend'], { label: string; color: string }> = {
+const TREND_COPY: Record<Situation['trend']['state'], { label: string; color: string }> = {
   escalating: { label: 'Escalating', color: 'var(--band-high)' },
   steady: { label: 'Holding steady', color: 'var(--band-medium)' },
   easing: { label: 'Easing', color: 'var(--band-low)' },
@@ -225,7 +225,19 @@ export default function SituationPanel({
         )}
       </Section>
 
-      {inPath.length ? (
+      {!inPath.length ? (
+        /* This section used to disappear when empty, which reads as broken
+           rather than as "nothing is in the path". Say which it is. */
+        <Section title="In the projected path">
+          <Empty>
+            {!situation.tracked
+              ? 'No storm near this point is reporting a motion vector, so there is no path to project yet.'
+              : exposure.facilities.length
+                ? 'A storm is being tracked, but no critical facility falls inside its projected corridor.'
+                : 'No infrastructure data has loaded for this area, so nothing can be placed in the path.'}
+          </Empty>
+        </Section>
+      ) : (
         <Section
           title="In the projected path"
           aside={
@@ -264,7 +276,7 @@ export default function SituationPanel({
             published. They assume it holds its track and speed, which storms do not always do.
           </p>
         </Section>
-      ) : null}
+      )}
 
       <Section
         title="Weather"
@@ -356,13 +368,34 @@ export default function SituationPanel({
         )}
       </Section>
 
-      <Section title="Trend">
-        <p className="text-sm font-semibold" style={{ color: TREND_COPY[trend].color }}>
-          {TREND_COPY[trend].label}
+      <Section
+        title="Trend"
+        aside={
+          trend.products ? (
+            <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              {trend.products} products
+            </span>
+          ) : null
+        }
+      >
+        <p className="text-sm font-semibold" style={{ color: TREND_COPY[trend.state].color }}>
+          {TREND_COPY[trend.state].label}
         </p>
-        <p className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-          Judged from how successive warnings for this storm changed, including upgrades from radar
-          indicated to observed.
+
+        {trend.detail ? (
+          <p className="mt-1.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
+            {trend.detail}
+          </p>
+        ) : (
+          <p className="mt-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+            No tornado or severe thunderstorm warning is in effect near this point, so there is no
+            storm to follow. A trend appears once a storm has been warned more than once.
+          </p>
+        )}
+
+        <p className="mt-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          Judged by following one storm through its own updates, matched on the tracking number the
+          National Weather Service puts in every product it issues.
         </p>
       </Section>
     </div>

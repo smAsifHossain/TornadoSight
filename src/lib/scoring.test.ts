@@ -354,3 +354,139 @@ describe('geo', () => {
     expect(distanceMiles(wichita, kansasCity)).toBeCloseTo(178, -1);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Trend
+ * ------------------------------------------------------------------ */
+
+import { assessTrend } from './situation';
+
+/** A product for one storm, identified by its VTEC tracking number. */
+function product(
+  event: string,
+  opts: { etn?: string; sentMinutes?: number; detection?: string; damage?: string; gust?: string } = {},
+) {
+  const { etn = '0001', sentMinutes = 0, detection, damage, gust } = opts;
+  const phenom = event === 'Tornado Warning' ? 'TO' : 'SV';
+  const params: Record<string, string[]> = {
+    VTEC: [`/O.NEW.KLUB.${phenom}.W.${etn}.000000T0000Z-260926T0415Z/`],
+  };
+  if (detection) params.tornadoDetection = [detection];
+  if (damage) params.tornadoDamageThreat = [damage];
+  if (gust) params.maxWindGust = [gust];
+
+  return normalizeAlert({
+    properties: {
+      id: `urn:${event}:${etn}:${sentMinutes}`,
+      event,
+      severity: 'Severe',
+      certainty: 'Observed',
+      urgency: 'Immediate',
+      sent: new Date(Date.UTC(2026, 8, 26, 2, sentMinutes)).toISOString(),
+      areaDesc: 'Parmer, TX',
+      description: '',
+      senderName: 'NWS Lubbock TX',
+      parameters: params,
+    },
+    geometry: null,
+  })!;
+}
+
+describe('assessTrend', () => {
+  it('reports nothing to follow when no storm is warned', () => {
+    const t = assessTrend([alertOf('Flash Flood Warning')]);
+    expect(t.state).toBe('unknown');
+    expect(t.detail).toBeNull();
+  });
+
+  it('calls a radar indicated tornado that gets confirmed on the ground escalating', () => {
+    const t = assessTrend([
+      product('Tornado Warning', { sentMinutes: 0, detection: 'RADAR INDICATED' }),
+      product('Tornado Warning', { sentMinutes: 12, detection: 'RADAR INDICATED' }),
+      product('Tornado Warning', { sentMinutes: 24, detection: 'OBSERVED' }),
+    ]);
+    expect(t.state).toBe('escalating');
+    expect(t.detail).toContain('confirmed on the ground');
+    expect(t.products).toBe(3);
+  });
+
+  it('calls a storm that loses ground confirmation easing', () => {
+    const t = assessTrend([
+      product('Tornado Warning', { sentMinutes: 0, detection: 'OBSERVED' }),
+      product('Tornado Warning', { sentMinutes: 15, detection: 'RADAR INDICATED' }),
+    ]);
+    expect(t.state).toBe('easing');
+    expect(t.detail).toContain('no longer confirmed');
+  });
+
+  it('calls an unchanged reissue steady', () => {
+    const t = assessTrend([
+      product('Severe Thunderstorm Warning', { sentMinutes: 0, detection: 'RADAR INDICATED' }),
+      product('Severe Thunderstorm Warning', { sentMinutes: 18, detection: 'RADAR INDICATED' }),
+    ]);
+    expect(t.state).toBe('steady');
+    expect(t.detail).toContain('without a change in threat');
+  });
+
+  // Regression: the earlier version compared whatever alerts happened to be
+  // nearby, so two unrelated storms looked like one escalating storm.
+  it('follows a single storm rather than mixing two unrelated ones', () => {
+    const t = assessTrend([
+      product('Severe Thunderstorm Warning', { etn: '0001', sentMinutes: 0 }),
+      product('Severe Thunderstorm Warning', { etn: '0001', sentMinutes: 20 }),
+      product('Tornado Warning', { etn: '0099', sentMinutes: 5, detection: 'OBSERVED' }),
+    ]);
+    // The tornado is the storm worth following, and it has only one product.
+    expect(t.products).toBe(1);
+    expect(t.detail).toContain('Nothing to compare');
+  });
+
+  it('notices a damage threat being added', () => {
+    const t = assessTrend([
+      product('Tornado Warning', { sentMinutes: 0, detection: 'RADAR INDICATED' }),
+      product('Tornado Warning', { sentMinutes: 10, detection: 'RADAR INDICATED', damage: 'CONSIDERABLE' }),
+    ]);
+    expect(t.state).toBe('escalating');
+    expect(t.detail).toContain('considerable damage threat');
+  });
+});
+
+describe('alert measurements', () => {
+  // Regression: hail size arrives as ".75" and a pattern needing a digit before
+  // the point read it as seventy five, so the panel said "hail to 75 in".
+  it('reads a hail size written with a leading decimal point', () => {
+    const a = alertOf('Severe Thunderstorm Warning', { maxHailSize: ['.75'] });
+    expect(a.maxHailInches).toBeCloseTo(0.75, 3);
+  });
+
+  it('reads sizes written normally', () => {
+    expect(alertOf('Severe Thunderstorm Warning', { maxHailSize: ['1.75'] }).maxHailInches).toBe(1.75);
+    expect(alertOf('Severe Thunderstorm Warning', { maxWindGust: ['60 MPH'] }).maxWindGustMph).toBe(60);
+  });
+});
+
+describe('trend narrative', () => {
+  // Regression: only increases were described, so a storm whose gust figure
+  // fell was labelled "easing" above a sentence saying nothing had changed.
+  it('explains a downgrade rather than claiming nothing changed', () => {
+    const t = assessTrend([
+      product('Severe Thunderstorm Warning', { sentMinutes: 0, gust: '80 MPH' }),
+      product('Severe Thunderstorm Warning', { sentMinutes: 20, gust: '60 MPH' }),
+    ]);
+    expect(t.state).toBe('easing');
+    expect(t.detail).toContain('lowered to 60 mph');
+    expect(t.detail).not.toContain('without a change');
+  });
+
+  it('never says the threat is unchanged while reporting it moved', () => {
+    const cases = [
+      [product('Tornado Warning', { sentMinutes: 0, detection: 'OBSERVED' }), product('Tornado Warning', { sentMinutes: 10, detection: 'RADAR INDICATED' })],
+      [product('Tornado Warning', { sentMinutes: 0 }), product('Tornado Warning', { sentMinutes: 10, detection: 'OBSERVED' })],
+      [product('Severe Thunderstorm Warning', { sentMinutes: 0, gust: '80 MPH' }), product('Severe Thunderstorm Warning', { sentMinutes: 9, gust: '55 MPH' })],
+    ];
+    for (const pair of cases) {
+      const t = assessTrend(pair);
+      if (t.state !== 'steady') expect(t.detail).not.toContain('without a change in threat');
+    }
+  });
+});

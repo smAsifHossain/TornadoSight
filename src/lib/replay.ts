@@ -1,22 +1,36 @@
 /**
- * Replay of a real severe weather event.
+ * Replay of real severe weather events.
  *
  * Severe weather does not schedule itself around demonstrations, and the
  * challenge forbids simulated interaction, so rather than inventing an event
- * the app replays one that genuinely happened. The fixture in
- * public/data/replay holds archived National Weather Service alerts exactly as
- * they were issued, including their polygons, motion vectors and detection
- * flags. Replay steps a clock through that window and shows what a responder
- * would have seen at each moment.
+ * the app replays ones that genuinely happened. Each fixture in
+ * public/data/replay holds the archived National Weather Service products for a
+ * single storm, grouped by the VTEC identifier the products themselves carry,
+ * exactly as issued: polygons, motion vectors, detection flags and all.
+ *
+ * `scripts/discover-events.mjs` builds the library by scanning the archive for
+ * storms with enough updates to be worth watching, so the catalogue refreshes
+ * as new weather happens rather than being one hand-picked storm forever.
  */
 
 import { normalizeAlert, type Alert } from './nws';
 
 const BASE = import.meta.env.BASE_URL ?? '/';
 
-export interface ReplayEvent {
+export interface ReplayEntry {
   slug: string;
   title: string;
+  summary: string;
+  kind: 'tornado' | 'severe';
+  /** True when a tornado was confirmed on the ground, not just radar indicated. */
+  observed: boolean;
+  products: number;
+  minutes: number;
+  office: string;
+  start: string;
+}
+
+export interface ReplayEvent extends ReplayEntry {
   note: string;
   window: { start: Date; end: Date };
   bounds: { west: number; south: number; east: number; north: number };
@@ -24,19 +38,21 @@ export interface ReplayEvent {
   alerts: Alert[];
 }
 
-/** The events shipped with the app. */
-export const REPLAY_CATALOG = [
-  {
-    slug: 'clovis-friona-supercell',
-    title: 'Curry County NM to Parmer County TX supercell',
-    summary:
-      'A single supercell tracked north east across the New Mexico and Texas line, ' +
-      'drawing twelve consecutive tornado warnings over roughly two hours.',
-  },
-] as const;
+let catalogPromise: Promise<ReplayEntry[]> | null = null;
+
+/** Every event the app can replay, best first. */
+export function loadCatalog(): Promise<ReplayEntry[]> {
+  catalogPromise ??= fetch(`${BASE}data/replay/catalog.json`)
+    .then((r) => (r.ok ? (r.json() as Promise<ReplayEntry[]>) : []))
+    .catch(() => []);
+  return catalogPromise;
+}
 
 export async function loadReplay(slug: string): Promise<ReplayEvent> {
-  const res = await fetch(`${BASE}data/replay/${slug}.json`);
+  const [catalog, res] = await Promise.all([
+    loadCatalog(),
+    fetch(`${BASE}data/replay/${slug}.json`),
+  ]);
   if (!res.ok) throw new Error(`Replay event ${slug} could not be loaded.`);
 
   const data = (await res.json()) as {
@@ -48,11 +64,18 @@ export async function loadReplay(slug: string): Promise<ReplayEvent> {
     features: unknown[];
   };
 
-  const catalog = REPLAY_CATALOG.find((c) => c.slug === slug);
+  const entry = catalog.find((c) => c.slug === slug);
 
   return {
     slug: data.slug,
-    title: catalog?.title ?? data.slug,
+    title: entry?.title ?? data.slug,
+    summary: entry?.summary ?? '',
+    kind: entry?.kind ?? 'severe',
+    observed: entry?.observed ?? false,
+    products: entry?.products ?? data.features.length,
+    minutes: entry?.minutes ?? 0,
+    office: entry?.office ?? '',
+    start: entry?.start ?? data.window.start,
     note: data.note,
     window: { start: new Date(data.window.start), end: new Date(data.window.end) },
     bounds: data.bounds,
@@ -62,6 +85,18 @@ export async function loadReplay(slug: string): Promise<ReplayEvent> {
       .filter((a): a is Alert => a !== null)
       .sort((a, b) => a.sent.getTime() - b.sent.getTime()),
   };
+}
+
+/**
+ * Which event to open on. Rotates through the catalogue so the same storm is
+ * not shown every single time, while still favouring the ones with a tornado
+ * confirmed on the ground, which are the most informative to watch.
+ */
+export function pickEvent(catalog: ReplayEntry[], seed = Date.now()): ReplayEntry | null {
+  if (!catalog.length) return null;
+  const observed = catalog.filter((c) => c.observed);
+  const pool = observed.length ? observed : catalog;
+  return pool[Math.floor(seed / 60000) % pool.length];
 }
 
 /**
@@ -77,45 +112,27 @@ export function alertsAt(event: ReplayEvent, at: Date): Alert[] {
   });
 }
 
-/** Bounds of the alerts issued during the event, tighter than the fixture's. */
 export function activeBounds(event: ReplayEvent): [number, number, number, number] {
   return [event.bounds.west, event.bounds.south, event.bounds.east, event.bounds.north];
 }
 
 /**
- * A sensible point to focus on: where radar last placed the storm, so the
- * selection follows the storm rather than sitting still while it moves away.
- */
-export function focusAt(event: ReplayEvent, at: Date): { lat: number; lon: number } | null {
-  const live = alertsAt(event, at).filter((a) => a.motion);
-  if (!live.length) return null;
-  const newest = live.reduce((best, a) => (a.sent > best.sent ? a : best), live[0]);
-  return newest.motion!.position;
-}
-
-/**
- * Where replay should open: just before the first warning that carries a storm
- * motion vector, positioned on that storm. Opening at the start of the captured
- * window instead shows an empty map, and opening on an alert with no motion
- * shows a warning with nothing to project.
+ * Where replay should open: on the first warning that carries a storm motion
+ * vector, a minute after it was issued.
+ *
+ * A minute *after*, not before. Opening before means the warning does not exist
+ * yet and the panel correctly reports nothing active, which reads as a broken
+ * replay rather than an accurate one.
  */
 export function openingMoment(event: ReplayEvent): { at: Date; point: { lat: number; lon: number } | null } {
-  // Prefer the storm the event is actually about. A capture also holds flood
-  // and statement products that carry motion vectors, and opening on one of
-  // those shows a tracked storm that is not the tornadic one.
   const byPriority = ['Tornado Warning', 'Severe Thunderstorm Warning'];
   const tracked =
     byPriority
-      .map((event_) => event.alerts.find((a) => a.motion && a.event === event_))
+      .map((name) => event.alerts.find((a) => a.motion && a.event === name))
       .find(Boolean) ?? event.alerts.find((a) => a.motion);
 
   if (!tracked) return { at: event.window.start, point: null };
-
-  // Open a minute *after* issuance, not before it. Opening before means the
-  // alert does not exist yet and the panel correctly reports nothing active,
-  // which looks like a broken replay.
-  const at = new Date(tracked.sent.getTime() + 60_000);
-  return { at, point: tracked.motion!.position };
+  return { at: new Date(tracked.sent.getTime() + 60_000), point: tracked.motion!.position };
 }
 
 /** Bounds that frame the tracked storm rather than every alert in the capture. */
@@ -126,11 +143,24 @@ export function trackedBounds(event: ReplayEvent): [number, number, number, numb
   if (!points.length) return null;
   const lats = points.map((p) => p.lat);
   const lons = points.map((p) => p.lon);
-  const pad = 0.45;
+  const pad = 0.4;
   return [
     Math.min(...lons) - pad,
     Math.min(...lats) - pad,
     Math.max(...lons) + pad,
     Math.max(...lats) + pad,
   ];
+}
+
+/**
+ * The path radar actually traced, as a line through every reported storm
+ * position in order. This is history, not a projection, and the map draws it
+ * differently for that reason.
+ */
+export function observedTrack(event: ReplayEvent, upTo?: Date): { lat: number; lon: number }[] {
+  const limit = upTo?.getTime() ?? Infinity;
+  return event.alerts
+    .filter((a) => a.motion && a.sent.getTime() <= limit)
+    .sort((a, b) => a.motion!.time.getTime() - b.motion!.time.getTime())
+    .map((a) => a.motion!.position);
 }

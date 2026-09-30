@@ -20,7 +20,18 @@ import {
   type ReportStatus,
   type StoredReport,
 } from './lib/storage';
-import { alertsAt, loadReplay, openingMoment, REPLAY_CATALOG, trackedBounds, activeBounds, type ReplayEvent } from './lib/replay';
+import {
+  alertsAt,
+  loadCatalog,
+  loadReplay,
+  observedTrack,
+  openingMoment,
+  pickEvent,
+  trackedBounds,
+  activeBounds,
+  type ReplayEntry,
+  type ReplayEvent,
+} from './lib/replay';
 
 export type Mode = 'live' | 'replay';
 type Tab = 'situation' | 'reports' | 'exposure';
@@ -62,6 +73,7 @@ export default function App() {
   const [facilitySource, setFacilitySource] = useState<FacilitySource>('none');
   const [reports, setReports] = useState<StoredReport[]>([]);
 
+  const [catalog, setCatalog] = useState<ReplayEntry[]>([]);
   const [replay, setReplay] = useState<ReplayEvent | null>(null);
   const [replayAt, setReplayAt] = useState<Date | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -73,6 +85,9 @@ export default function App() {
   const [showRadar, setShowRadar] = useState(true);
   const [showFacilities, setShowFacilities] = useState(true);
   const [fitBounds, setFitBounds] = useState<[number, number, number, number] | null>(null);
+  const [highlighted, setHighlighted] = useState<string | null>(null);
+  /** Show only storms that actually carry a tornado warning. */
+  const [tornadoesOnly, setTornadoesOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   /* A slow tick so every relative time on screen stays honest. */
@@ -114,21 +129,34 @@ export default function App() {
    * Replay
    * ---------------------------------------------------------------- */
 
-  useEffect(() => {
-    if (mode !== 'replay' || replay) return;
-    void loadReplay(REPLAY_CATALOG[0].slug)
+  const openEvent = useCallback((slug: string) => {
+    setPlaying(false);
+    void loadReplay(slug)
       .then((event) => {
         setReplay(event);
-        // Open just before the first tracked storm, on that storm, rather than
-        // at the start of the captured window looking at an empty map.
+        // Open on the first tracked storm rather than at the start of the
+        // captured window, which would show an empty map waiting for it.
         const opening = openingMoment(event);
         setReplayAt(opening.at);
         if (opening.point) setPoint(opening.point);
         setFitBounds(trackedBounds(event) ?? activeBounds(event));
         setError(null);
       })
-      .catch((err) => setError(`The replay event could not be loaded: ${err.message}`));
-  }, [mode, replay]);
+      .catch((err) => setError(`That replay event could not be loaded: ${err.message}`));
+  }, []);
+
+  useEffect(() => {
+    if (mode !== 'replay' || replay) return;
+    void loadCatalog().then((list) => {
+      setCatalog(list);
+      const chosen = pickEvent(list);
+      if (!chosen) {
+        setError('No replay events are available. Run scripts/discover-events.mjs to build the library.');
+        return;
+      }
+      openEvent(chosen.slug);
+    });
+  }, [mode, replay, openEvent]);
 
   useEffect(() => {
     if (mode !== 'replay' || !replay || !playing) return;
@@ -146,12 +174,23 @@ export default function App() {
     return () => clearInterval(id);
   }, [mode, replay, playing]);
 
-  const visibleAlerts = useMemo(() => {
-    if (mode === 'replay') {
-      return replay && replayAt ? alertsAt(replay, replayAt) : [];
-    }
+  /** Everything on screen before the tornado filter. */
+  const sourceAlerts = useMemo(() => {
+    if (mode === 'replay') return replay && replayAt ? alertsAt(replay, replayAt) : [];
     return alerts;
   }, [mode, replay, replayAt, alerts]);
+
+  const tornadoCount = useMemo(
+    () => sourceAlerts.filter((a) => a.event === 'Tornado Warning' || a.event === 'Tornado Watch').length,
+    [sourceAlerts],
+  );
+
+  const visibleAlerts = useMemo(() => {
+    if (!tornadoesOnly) return sourceAlerts;
+    // During an outbreak the national feed is mostly flood and marine products
+    // and the thing you are looking for is buried under them.
+    return sourceAlerts.filter((a) => a.event === 'Tornado Warning' || a.event === 'Tornado Watch');
+  }, [sourceAlerts, tornadoesOnly]);
 
   /* Follow the storm during replay so the selection does not fall behind it. */
   useEffect(() => {
@@ -213,10 +252,31 @@ export default function App() {
    */
   const clock = mode === 'replay' && replayAt ? replayAt.getTime() : now;
 
+  /** Where radar has already placed this storm, drawn as history behind it. */
+  const track = useMemo(
+    () => (mode === 'replay' && replay && replayAt ? observedTrack(replay, replayAt) : []),
+    [mode, replay, replayAt],
+  );
+
+  /** Focus the map on one facility and make it stand out from its neighbours. */
+  const focusFacility = useCallback(
+    (id: string) => {
+      const found = situationRef.current?.exposure.facilities.find((f) => f.id === id);
+      if (!found) return;
+      setHighlighted(id);
+      setFitBounds([found.lon - 0.05, found.lat - 0.04, found.lon + 0.05, found.lat + 0.04]);
+    },
+    [],
+  );
+
+  const situationRef = useRef<Situation | null>(null);
+
   const situation: Situation | null = useMemo(
     () => buildSituation({ point, alerts: visibleAlerts, weather, facilities }),
     [point, visibleAlerts, weather, facilities],
   );
+
+  situationRef.current = situation;
 
   const handleSubmitReport = useCallback(
     async (draft: ReportDraft) => {
@@ -328,6 +388,11 @@ export default function App() {
           setPlaying(false);
           setReplayAt(d);
         }}
+        catalog={catalog}
+        onPickEvent={openEvent}
+        tornadoesOnly={tornadoesOnly}
+        onTornadoesOnly={setTornadoesOnly}
+        tornadoCount={tornadoCount}
       />
 
       {error ? (
@@ -357,7 +422,13 @@ export default function App() {
             showFacilities={showFacilities}
             theme={theme}
             fitBounds={fitBounds}
-            onSelectPoint={setPoint}
+            track={track}
+            highlighted={highlighted}
+            onSelectPoint={(p) => {
+              setHighlighted(null);
+              setPoint(p);
+            }}
+            onSelectFacility={setHighlighted}
           />
 
           <div className="pointer-events-none absolute top-3 left-3 flex flex-col gap-2">
@@ -446,7 +517,7 @@ export default function App() {
 
           <div className={['min-h-0 flex-1 overflow-y-auto scroll-slim', sheetOpen ? '' : 'hidden lg:block'].join(' ')}>
             {tab === 'situation' ? (
-              <SituationPanel situation={situation} now={clock} />
+              <SituationPanel situation={situation} now={clock} onFocusFacility={focusFacility} />
             ) : tab === 'reports' ? (
               <ReportsPanel
                 reports={reports}
@@ -459,7 +530,12 @@ export default function App() {
                 onExport={() => void handleExport()}
               />
             ) : (
-              <ExposurePanel situation={situation} source={facilitySource} />
+              <ExposurePanel
+                situation={situation}
+                source={facilitySource}
+                highlighted={highlighted}
+                onFocusFacility={focusFacility}
+              />
             )}
           </div>
         </aside>

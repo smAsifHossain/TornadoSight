@@ -22,9 +22,14 @@ const SOURCE_COPY: Record<FacilitySource, string> = {
 export default function ExposurePanel({
   situation,
   source,
+  highlighted,
+  onFocusFacility,
 }: {
   situation: Situation | null;
   source: FacilitySource;
+  /** The facility currently singled out on the map, if any. */
+  highlighted?: string | null;
+  onFocusFacility?: (id: string) => void;
 }) {
   if (!situation) {
     return (
@@ -93,30 +98,41 @@ export default function ExposurePanel({
             {exposure.facilities.slice(0, 40).map((f) => (
               <li
                 key={f.id}
-                className="flex items-center gap-2.5 rounded-lg px-2.5 py-2"
-                style={{ background: 'var(--surface-raised)' }}
               >
-                <span
-                  aria-hidden
-                  className="size-2.5 shrink-0 rounded-full"
-                  style={{ background: FACILITY_COLOR[f.kind] ?? FACILITY_COLOR.other }}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
-                    {f.name}
-                  </span>
-                  <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    {facilityLabel(f.kind)} &middot; {f.distanceMiles.toFixed(1)} mi
-                  </span>
-                </span>
-                {f.minutesToImpact !== null ? (
+                {/* Clicking a row puts that one facility on the map and rings
+                    it, so a name in a list of forty becomes a place. */}
+                <button
+                  type="button"
+                  onClick={() => onFocusFacility?.(f.id)}
+                  aria-pressed={highlighted === f.id}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors"
+                  style={{
+                    background: highlighted === f.id ? 'var(--surface-panel)' : 'var(--surface-raised)',
+                    boxShadow: highlighted === f.id ? '0 0 0 1px var(--accent) inset' : 'none',
+                  }}
+                >
                   <span
-                    className="shrink-0 text-xs font-bold tabular-nums"
-                    style={{ color: f.minutesToImpact <= 15 ? 'var(--band-high)' : 'var(--band-medium)' }}
-                  >
-                    {Math.round(f.minutesToImpact)} min
+                    aria-hidden
+                    className="size-2.5 shrink-0 rounded-full"
+                    style={{ background: FACILITY_COLOR[f.kind] ?? FACILITY_COLOR.other }}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
+                      {f.name}
+                    </span>
+                    <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                      {facilityLabel(f.kind)} &middot; {f.distanceMiles.toFixed(1)} mi
+                    </span>
                   </span>
-                ) : null}
+                  {f.minutesToImpact !== null ? (
+                    <span
+                      className="shrink-0 text-xs font-bold tabular-nums"
+                      style={{ color: f.minutesToImpact <= 15 ? 'var(--band-high)' : 'var(--band-medium)' }}
+                    >
+                      {Math.round(f.minutesToImpact)} min
+                    </span>
+                  ) : null}
+                </button>
               </li>
             ))}
           </ul>

@@ -1,0 +1,156 @@
+[
+  {
+    "slug": "pawnee-ks-2026-09-30-kddc-0006",
+    "title": "Pawnee, KS, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Dodge City KS. 7 products over 46 minutes, with a tornado observed on the ground.",
+    "kind": "tornado",
+    "observed": true,
+    "products": 7,
+    "minutes": 46,
+    "office": "NWS Dodge City KS",
+    "start": "2026-09-30T20:35:00.000Z"
+  },
+  {
+    "slug": "potter-tx-2026-09-30-kama-0026",
+    "title": "Potter, TX, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 5 products over 39 minutes, with a tornado observed on the ground.",
+    "kind": "tornado",
+    "observed": true,
+    "products": 5,
+    "minutes": 39,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-30T02:19:00.000Z"
+  },
+  {
+    "slug": "armstrong-tx-2026-09-29-kama-0323",
+    "title": "Armstrong, TX, September 29, 2026",
+    "summary": "Severe thunderstorm warning sequence from NWS Amarillo TX. 6 products over 63 minutes.",
+    "kind": "severe",
+    "observed": false,
+    "products": 6,
+    "minutes": 63,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-29T22:05:00.000Z"
+  },
+  {
+    "slug": "dunn-nd-2026-09-29-kbis-0348",
+    "title": "Dunn, ND, September 29, 2026",
+    "summary": "Severe thunderstorm warning sequence from NWS Bismarck ND. 6 products over 54 minutes.",
+    "kind": "severe",
+    "observed": false,
+    "products": 6,
+    "minutes": 54,
+    "office": "NWS Bismarck ND",
+    "start": "2026-09-29T03:15:00.000Z"
+  },
+  {
+    "slug": "carson-tx-2026-09-30-kama-0027",
+    "title": "Carson, TX, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 5 products over 47 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 5,
+    "minutes": 47,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-30T03:02:00.000Z"
+  },
+  {
+    "slug": "armstrong-tx-2026-09-29-kama-0324",
+    "title": "Armstrong, TX, September 29, 2026",
+    "summary": "Severe thunderstorm warning sequence from NWS Amarillo TX. 5 products over 52 minutes.",
+    "kind": "severe",
+    "observed": false,
+    "products": 5,
+    "minutes": 52,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-29T22:16:00.000Z"
+  },
+  {
+    "slug": "eddy-nm-2026-09-30-kmaf-0273",
+    "title": "Eddy, NM, September 30, 2026",
+    "summary": "Severe thunderstorm warning sequence from NWS Midland/Odessa TX. 5 products over 49 minutes.",
+    "kind": "severe",
+    "observed": false,
+    "products": 5,
+    "minutes": 49,
+    "office": "NWS Midland/Odessa TX",
+    "start": "2026-09-30T01:53:00.000Z"
+  },
+  {
+    "slug": "potter-tx-2026-09-30-kama-0023",
+    "title": "Potter, TX, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 4 products over 37 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 37,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-30T01:15:00.000Z"
+  },
+  {
+    "slug": "donley-tx-2026-09-29-kama-0013",
+    "title": "Donley, TX, September 29, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 4 products over 34 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 34,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-29T22:33:00.000Z"
+  },
+  {
+    "slug": "barton-ks-2026-09-30-kict-0025",
+    "title": "Barton, KS, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Wichita KS. 4 products over 33 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 33,
+    "office": "NWS Wichita KS",
+    "start": "2026-09-30T21:01:00.000Z"
+  },
+  {
+    "slug": "deaf-smith-tx-2026-09-30-kama-0025",
+    "title": "Deaf Smith, TX, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 4 products over 28 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 28,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-30T01:26:00.000Z"
+  },
+  {
+    "slug": "armstrong-tx-2026-09-30-kama-0015",
+    "title": "Armstrong, TX, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 4 products over 28 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 28,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-30T00:11:00.000Z"
+  },
+  {
+    "slug": "gray-tx-2026-09-30-kama-0014",
+    "title": "Gray, TX, September 30, 2026",
+    "summary": "Tornado warning sequence from NWS Amarillo TX. 4 products over 28 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 28,
+    "office": "NWS Amarillo TX",
+    "start": "2026-09-29T23:58:00.000Z"
+  },
+  {
+    "slug": "parmer-tx-2026-09-26-klub-0004",
+    "title": "Parmer, TX, September 26, 2026",
+    "summary": "Tornado warning sequence from NWS Lubbock TX. 4 products over 28 minutes.",
+    "kind": "tornado",
+    "observed": false,
+    "products": 4,
+    "minutes": 28,
+    "office": "NWS Lubbock TX",
+    "start": "2026-09-26T03:38:00.000Z"
+  }
+]

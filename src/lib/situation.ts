@@ -34,7 +34,7 @@ export interface Situation {
   priority: PriorityResult;
   /** The alert driving the storm track, if any. */
   tracked: Alert | null;
-  trend: Trend;
+  trend: TrendResult;
 }
 
 /** Alerts whose polygon actually contains the point. */
@@ -74,38 +74,125 @@ export function rankAlerts(alerts: Alert[]): Alert[] {
   });
 }
 
+export interface TrendResult {
+  state: Trend;
+  /** What was actually observed, in plain words, or null when there is nothing. */
+  detail: string | null;
+  /** How many products for this storm the judgement is based on. */
+  products: number;
+}
+
+/**
+ * How threatening a single product is. Ordered so that each step up is a real
+ * operational escalation rather than a cosmetic one.
+ */
+function threatWeight(a: Alert): number {
+  let w = a.event === 'Tornado Warning' ? 3 : 1;
+  if (a.tornadoDetection === 'RADAR INDICATED') w += 1;
+  if (a.tornadoDetection === 'OBSERVED') w += 3;
+  const damage = a.tornadoDamageThreat?.toUpperCase();
+  if (damage === 'CONSIDERABLE') w += 2;
+  if (damage === 'CATASTROPHIC') w += 4;
+  if (a.severity === 'Extreme') w += 1;
+  if ((a.maxWindGustMph ?? 0) >= 70) w += 1;
+  if ((a.maxHailInches ?? 0) >= 2) w += 1;
+  return w;
+}
+
 /**
  * Whether the situation is getting worse, holding, or letting up.
  *
- * The challenge brief asks explicitly whether an event is escalating, steady or
- * de-escalating. Rather than guessing from a single snapshot we compare the
- * successive warnings issued for the same storm: an office that upgrades from
- * radar indicated to observed, or reissues a warning with a later expiry, is
- * telling us the threat is growing.
+ * The brief asks explicitly whether an event is escalating, steady or
+ * de-escalating. The judgement is made by following one storm through its own
+ * updates, identified by the VTEC tracking number the products carry, rather
+ * than by comparing unrelated alerts that happen to be nearby. A weather office
+ * that upgrades a warning from radar indicated to observed, or adds a
+ * considerable damage threat, is telling you directly that the threat is
+ * growing, and that is what this reads.
  */
-export function assessTrend(alerts: Alert[]): Trend {
-  const warnings = alerts
-    .filter((a) => a.event === 'Tornado Warning' || a.event === 'Severe Thunderstorm Warning')
-    .sort((a, b) => a.sent.getTime() - b.sent.getTime());
-  if (warnings.length < 2) return warnings.length ? 'steady' : 'unknown';
+export function assessTrend(alerts: Alert[]): TrendResult {
+  const warnings = alerts.filter(
+    (a) => a.event === 'Tornado Warning' || a.event === 'Severe Thunderstorm Warning',
+  );
+  if (!warnings.length) return { state: 'unknown', detail: null, products: 0 };
 
-  const weight = (a: Alert) => {
-    let w = a.event === 'Tornado Warning' ? 2 : 1;
-    if (a.tornadoDetection === 'OBSERVED') w += 2;
-    if (a.tornadoDamageThreat) w += 1;
-    if (a.severity === 'Extreme') w += 1;
-    return w;
-  };
+  // Group by storm, then follow the most threatening one.
+  const storms = new Map<string, Alert[]>();
+  for (const a of warnings) {
+    const key = a.stormKey ?? `${a.event}:${a.areaDesc}`;
+    if (!storms.has(key)) storms.set(key, []);
+    storms.get(key)!.push(a);
+  }
 
-  const half = Math.floor(warnings.length / 2);
-  const earlier = warnings.slice(0, half).map(weight);
-  const later = warnings.slice(half).map(weight);
-  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / (xs.length || 1);
+  let tracked: Alert[] = [];
+  let bestWeight = -1;
+  for (const group of storms.values()) {
+    const peak = Math.max(...group.map(threatWeight));
+    if (peak > bestWeight || (peak === bestWeight && group.length > tracked.length)) {
+      bestWeight = peak;
+      tracked = group;
+    }
+  }
 
-  const delta = mean(later) - mean(earlier);
-  if (delta > 0.4) return 'escalating';
-  if (delta < -0.4) return 'easing';
-  return 'steady';
+  tracked.sort((a, b) => a.sent.getTime() - b.sent.getTime());
+
+  if (tracked.length < 2) {
+    return {
+      state: 'steady',
+      detail: `One product so far for this storm, ${tracked[0].event.toLowerCase()} from ${tracked[0].senderName}. Nothing to compare it against yet.`,
+      products: tracked.length,
+    };
+  }
+
+  const first = tracked[0];
+  const last = tracked[tracked.length - 1];
+  const delta = threatWeight(last) - threatWeight(first);
+
+  // Say what changed, not just that something did.
+  const changes: string[] = [];
+  if (first.event !== last.event && last.event === 'Tornado Warning') {
+    changes.push('upgraded to a tornado warning');
+  }
+  if (first.tornadoDetection !== 'OBSERVED' && last.tornadoDetection === 'OBSERVED') {
+    changes.push('a tornado is now confirmed on the ground');
+  }
+  if (!first.tornadoDamageThreat && last.tornadoDamageThreat) {
+    changes.push(`a ${last.tornadoDamageThreat.toLowerCase()} damage threat was added`);
+  }
+  if ((last.maxWindGustMph ?? 0) > (first.maxWindGustMph ?? 0)) {
+    changes.push(`peak gust raised to ${last.maxWindGustMph} mph`);
+  }
+  if ((last.maxHailInches ?? 0) > (first.maxHailInches ?? 0)) {
+    changes.push(`hail raised to ${last.maxHailInches} inches`);
+  }
+
+  // Describe the way down as well as the way up. Reporting only increases let
+  // the panel say "easing" above a sentence claiming nothing had changed.
+  if (first.event === 'Tornado Warning' && last.event !== 'Tornado Warning') {
+    changes.push(`downgraded to a ${last.event.toLowerCase()}`);
+  }
+  if (first.tornadoDetection === 'OBSERVED' && last.tornadoDetection === 'RADAR INDICATED') {
+    changes.push('no longer confirmed on the ground');
+  }
+  if (first.tornadoDamageThreat && !last.tornadoDamageThreat) {
+    changes.push('the damage threat was dropped');
+  }
+  if ((last.maxWindGustMph ?? 0) < (first.maxWindGustMph ?? 0)) {
+    changes.push(`peak gust lowered to ${last.maxWindGustMph} mph`);
+  }
+  if ((last.maxHailInches ?? 0) < (first.maxHailInches ?? 0)) {
+    changes.push(`hail lowered to ${last.maxHailInches} inches`);
+  }
+
+  const span = Math.round((last.sent.getTime() - first.sent.getTime()) / 60000);
+  const basis = `${tracked.length} products over ${span} minutes from ${last.senderName}`;
+
+  const state: Trend = delta > 0 ? 'escalating' : delta < 0 ? 'easing' : 'steady';
+  const detail = changes.length
+    ? `${changes.join(', ')}. Based on ${basis}.`
+    : `The warning has been reissued without a change in threat. Based on ${basis}.`;
+
+  return { state, detail, products: tracked.length };
 }
 
 /** The most recently issued alert that carries a usable motion vector. */

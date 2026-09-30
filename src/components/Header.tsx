@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { placeLabel, searchPlaces, type Place } from '../lib/geocode';
-import type { ReplayEvent } from '../lib/replay';
+import type { ReplayEntry, ReplayEvent } from '../lib/replay';
 import { relativeTime } from './ui';
 import type { Mode } from '../App';
 
@@ -128,6 +128,13 @@ export interface HeaderProps {
   playing: boolean;
   onPlayToggle: () => void;
   onScrub: (d: Date) => void;
+  /** Every archived storm the app can replay. */
+  catalog: ReplayEntry[];
+  onPickEvent: (slug: string) => void;
+  tornadoesOnly: boolean;
+  onTornadoesOnly: (v: boolean) => void;
+  /** Tornado products available before the filter, for the toggle's label. */
+  tornadoCount: number;
 }
 
 export default function Header(props: HeaderProps) {
@@ -147,6 +154,11 @@ export default function Header(props: HeaderProps) {
     playing,
     onPlayToggle,
     onScrub,
+    catalog,
+    onPickEvent,
+    tornadoesOnly,
+    onTornadoesOnly,
+    tornadoCount,
   } = props;
 
   const replaying = mode === 'replay';
@@ -203,6 +215,23 @@ export default function Header(props: HeaderProps) {
         <PlaceSearch onPick={onPickPlace} />
 
         <div className="ml-auto flex items-center gap-2">
+          {/* During an outbreak the map fills with flood and marine products.
+              This strips it back to the one hazard the tool is for. */}
+          <button
+            type="button"
+            onClick={() => onTornadoesOnly(!tornadoesOnly)}
+            aria-pressed={tornadoesOnly}
+            className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold"
+            style={{
+              background: tornadoesOnly ? 'var(--band-high)' : 'var(--surface-raised)',
+              color: tornadoesOnly ? '#fff' : 'var(--text-secondary)',
+            }}
+            title="Show only tornado warnings and watches"
+          >
+            Tornadoes only
+            <span className="ml-1 tabular-nums opacity-80">{tornadoCount}</span>
+          </button>
+
           <span className="hidden text-[11px] tabular-nums sm:inline" style={{ color: 'var(--text-muted)' }}>
             {alertCount} active
           </span>
@@ -274,8 +303,32 @@ export default function Header(props: HeaderProps) {
                 {replayAt.toUTCString().slice(5, 22)} UTC
               </time>
 
+              {/* Pick a different storm. The library is rebuilt from the
+                  archive, so it grows as real weather happens. */}
+              <label className="flex items-center gap-1.5 text-[11px]">
+                <span className="sr-only">Choose which archived storm to replay</span>
+                <select
+                  value={replay.slug}
+                  onChange={(e) => onPickEvent(e.target.value)}
+                  className="max-w-56 rounded-lg border px-2 py-1 text-[11px]"
+                  style={{
+                    background: 'var(--surface-input)',
+                    borderColor: 'var(--border-soft)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  {catalog.map((c) => (
+                    <option key={c.slug} value={c.slug}>
+                      {c.observed ? '● ' : ''}
+                      {c.title} ({c.products} products)
+                    </option>
+                  ))}
+                </select>
+              </label>
+
               <p className="w-full text-[11px] sm:w-auto" style={{ color: 'var(--text-muted)' }}>
-                {replay.title}. Genuine archived National Weather Service alerts, nothing simulated.
+                {replay.summary || replay.title} Genuine archived National Weather Service products,
+                nothing simulated.
               </p>
             </>
           ) : (

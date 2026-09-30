@@ -8,71 +8,71 @@ import type { StoredReport } from '../lib/storage';
 /**
  * The operational picture.
  *
- * Layer order is deliberate and follows how a responder reads the screen:
- * radar underneath for context, then warning polygons, then the projected storm
- * corridor, then infrastructure, and reports on top because a report is the
+ * Reading order drives the layer order. Radar sits underneath for context, then
+ * warning polygons, then the track the storm has already traced, then where it
+ * is going, then infrastructure, and reports on top, because a report is the
  * thing a person has to act on.
+ *
+ * Only one element on this map is allowed to move: the tornado warning and the
+ * storm head pulse. Everything else is still. Motion is the strongest signal a
+ * screen has and spending it on anything less than "a tornado is on the ground
+ * and heading somewhere" wastes it.
  */
 
 /**
- * A raster basemap rather than a vector style, on purpose.
+ * A raster basemap rather than a hosted vector style, on purpose.
  *
- * A hosted vector style was tried first and had to be dropped: it pulls a
- * stylesheet, a sprite sheet, glyph ranges and two tile sources, and if any one
- * of them stalls MapLibre never fires its load event, so the warning polygons
- * are never drawn at all. That failure mode is unacceptable for a tool someone
- * opens during a tornado warning.
+ * A vector style pulls a stylesheet, a sprite sheet, glyph ranges and two tile
+ * sources, and when one of them stalled MapLibre never finished loading and the
+ * warning polygons were never drawn at all. Raster tiles have one failure mode:
+ * a missing tile costs a grey square, not the entire operational picture.
  *
- * Raster tiles have one dependency and one failure mode: a tile is either there
- * or it is not, and a missing tile costs a grey square rather than the entire
- * operational picture. Carto publishes matched dark and light basemaps, so the
- * theme switch changes the actual basemap instead of filtering a light one.
- * Both are free and need no key.
+ * Esri's Canvas basemaps need no key and are built as quiet backdrops for data
+ * overlay. Labels come as a separate layer so place names can sit *above* the
+ * warning polygons, which matters when a responder is trying to read which town
+ * is inside the red shape.
  */
-/**
- * Esri's Canvas basemaps. Note the tile path is {z}/{y}/{x}, row before column,
- * which is not the order MapLibre's template placeholders suggest.
- *
- * Carto was tried first and now returns an "API KEY REQUIRED" watermark tile
- * with a 200 status, so a plain status check does not catch it. These Canvas
- * layers need no key and are built as neutral backdrops for exactly this kind
- * of data overlay: quiet grey, few labels, nothing competing with a red warning
- * polygon.
- */
-const BASEMAP: Record<'dark' | 'light', string> = {
-  dark: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-  light:
-    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-};
+const BASEMAP = {
+  dark: {
+    base: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    labels:
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+    background: '#0a0e14',
+  },
+  light: {
+    base: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    labels:
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+    background: '#eef1f6',
+  },
+} as const;
+
 const BASEMAP_ATTRIBUTION =
   'Basemap: Esri, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 /** Iowa Environmental Mesonet NEXRAD base reflectivity, free and key-less. */
-const RADAR_TILES = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png';
+const RADAR_TILES =
+  'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png';
 
-/** A minimal style built entirely in code, with no external stylesheet to fetch. */
 function baseStyle(theme: 'dark' | 'light'): maplibregl.StyleSpecification {
+  const cfg = BASEMAP[theme];
   return {
     version: 8,
+    glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
     sources: {
-      basemap: {
-        type: 'raster',
-        tiles: [BASEMAP[theme]],
-        tileSize: 256,
-        attribution: BASEMAP_ATTRIBUTION,
-        maxzoom: 20,
-      },
+      basemap: { type: 'raster', tiles: [cfg.base], tileSize: 256, attribution: BASEMAP_ATTRIBUTION, maxzoom: 19 },
+      basemapLabels: { type: 'raster', tiles: [cfg.labels], tileSize: 256, maxzoom: 19 },
     },
     layers: [
-      { id: 'background', type: 'background', paint: { 'background-color': theme === 'dark' ? '#0a0e14' : '#eef1f6' } },
+      { id: 'background', type: 'background', paint: { 'background-color': cfg.background } },
       { id: 'basemap-layer', type: 'raster', source: 'basemap' },
     ],
   };
 }
 
 /**
- * Warning colours follow National Weather Service convention so that anyone who
- * has used a weather product before already knows what red means here.
+ * Warning colours follow National Weather Service convention, so anyone who has
+ * seen a weather product before already knows what red means here.
  */
 const ALERT_COLOR: Record<string, string> = {
   'Tornado Warning': '#ff2d2d',
@@ -99,6 +99,20 @@ const FACILITY_COLOR: Record<string, string> = {
   other: '#90a4ae',
 };
 
+/** Which facilities deserve to be drawn larger, matching the exposure weights. */
+const FACILITY_RANK: Record<string, number> = {
+  hospital: 3,
+  nursing_home: 3,
+  school: 2,
+  fire_station: 2,
+  police: 2,
+  power_substation: 2,
+  communication_tower: 1,
+  shelter: 1,
+  transport: 1,
+  other: 0,
+};
+
 export interface MapViewProps {
   alerts: Alert[];
   facilities: ExposedFacility[];
@@ -110,8 +124,15 @@ export interface MapViewProps {
   showFacilities: boolean;
   theme: 'dark' | 'light';
   fitBounds: [number, number, number, number] | null;
+  /** Radar fixes already reported for this storm, oldest first. */
+  track: { lat: number; lon: number }[];
+  /** Facility id to single out from its neighbours. */
+  highlighted: string | null;
   onSelectPoint: (p: LatLon) => void;
+  onSelectFacility: (id: string) => void;
 }
+
+const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
 
 function alertsToGeoJson(alerts: Alert[]): GeoJSON.FeatureCollection {
   return {
@@ -126,8 +147,9 @@ function alertsToGeoJson(alerts: Alert[]): GeoJSON.FeatureCollection {
           event: a.event,
           areaDesc: a.areaDesc,
           color: ALERT_COLOR[a.event] ?? ALERT_FALLBACK,
-          detection: a.tornadoDetection ?? '',
-          expires: a.expires ? a.expires.toISOString() : '',
+          // Tornado warnings get the emphasis. Everything else is context.
+          urgent: a.event === 'Tornado Warning' ? 1 : 0,
+          observed: a.tornadoDetection === 'OBSERVED' ? 1 : 0,
           sender: a.senderName,
         },
       })),
@@ -135,19 +157,22 @@ function alertsToGeoJson(alerts: Alert[]): GeoJSON.FeatureCollection {
 }
 
 /**
- * The projected path: a centreline from where radar last placed the storm, and
- * a corridor around it. This is the piece that turns "there is a warning" into
- * "this hospital has eleven minutes".
+ * Where the storm is going: a centreline from the last radar fix, a corridor
+ * around it, and tick marks every ten minutes so the projection reads as a
+ * schedule rather than a shape.
  */
 function pathToGeoJson(
   tracked: Alert | null,
   minutes: number,
   halfWidthMiles = 2.5,
-): { line: GeoJSON.FeatureCollection; corridor: GeoJSON.FeatureCollection; head: GeoJSON.FeatureCollection } {
-  const empty: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
-  if (!tracked?.motion || tracked.motion.speedMph <= 0) {
-    return { line: empty, corridor: empty, head: empty };
-  }
+): {
+  line: GeoJSON.FeatureCollection;
+  corridor: GeoJSON.FeatureCollection;
+  head: GeoJSON.FeatureCollection;
+  ticks: GeoJSON.FeatureCollection;
+} {
+  const empty = { line: EMPTY, corridor: EMPTY, head: EMPTY, ticks: EMPTY };
+  if (!tracked?.motion || tracked.motion.speedMph <= 0) return empty;
 
   const { position, heading, speedMph } = tracked.motion;
   const end = destination(position, heading, (speedMph * minutes) / 60);
@@ -162,6 +187,16 @@ function pathToGeoJson(
   ].map((p) => [p.lon, p.lat]);
   ring.push(ring[0]);
 
+  const tickFeatures: GeoJSON.Feature[] = [];
+  for (let m = 10; m <= minutes; m += 10) {
+    const at = destination(position, heading, (speedMph * m) / 60);
+    tickFeatures.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [at.lon, at.lat] },
+      properties: { label: `${m} min` },
+    });
+  }
+
   return {
     line: {
       type: 'FeatureCollection',
@@ -175,7 +210,7 @@ function pathToGeoJson(
               [end.lon, end.lat],
             ],
           },
-          properties: { minutes },
+          properties: {},
         },
       ],
     },
@@ -189,25 +224,68 @@ function pathToGeoJson(
         {
           type: 'Feature',
           geometry: { type: 'Point', coordinates: [position.lon, position.lat] },
-          properties: { heading, speed: Math.round(speedMph), event: tracked.event },
+          properties: {
+            heading,
+            speed: Math.round(speedMph),
+            event: tracked.event,
+            observed: tracked.tornadoDetection === 'OBSERVED' ? 1 : 0,
+          },
         },
       ],
+    },
+    ticks: { type: 'FeatureCollection', features: tickFeatures },
+  };
+}
+
+/** The path radar has already traced. History, so it is drawn faded. */
+function trackToGeoJson(track: { lat: number; lon: number }[]): {
+  line: GeoJSON.FeatureCollection;
+  dots: GeoJSON.FeatureCollection;
+} {
+  if (track.length < 2) return { line: EMPTY, dots: EMPTY };
+  return {
+    line: {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: track.map((p) => [p.lon, p.lat]) },
+          properties: {},
+        },
+      ],
+    },
+    dots: {
+      type: 'FeatureCollection',
+      features: track.slice(0, -1).map((p, i) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+        // Older fixes fade out, so the direction of travel is readable at a glance.
+        properties: { age: (i + 1) / track.length },
+      })),
     },
   };
 }
 
-function facilitiesToGeoJson(facilities: ExposedFacility[]): GeoJSON.FeatureCollection {
+function facilitiesToGeoJson(
+  facilities: ExposedFacility[],
+  highlighted: string | null,
+): GeoJSON.FeatureCollection {
   return {
     type: 'FeatureCollection',
     features: facilities.map((f) => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [f.lon, f.lat] },
       properties: {
+        id: f.id,
         name: f.name,
         kind: f.kind,
         color: FACILITY_COLOR[f.kind] ?? FACILITY_COLOR.other,
+        rank: FACILITY_RANK[f.kind] ?? 0,
         inPath: f.minutesToImpact !== null ? 1 : 0,
+        isHighlighted: f.id === highlighted ? 1 : 0,
         minutes: f.minutesToImpact === null ? -1 : Math.round(f.minutesToImpact),
+        label:
+          f.minutesToImpact !== null ? `${f.name} · ${Math.round(f.minutesToImpact)} min` : f.name,
         distance: Number(f.distanceMiles.toFixed(1)),
       },
     })),
@@ -236,8 +314,6 @@ function reportsToGeoJson(reports: StoredReport[]): GeoJSON.FeatureCollection {
   };
 }
 
-const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
-
 export default function MapView(props: MapViewProps) {
   const {
     alerts,
@@ -250,7 +326,10 @@ export default function MapView(props: MapViewProps) {
     showFacilities,
     theme,
     fitBounds,
+    track,
+    highlighted,
     onSelectPoint,
+    onSelectFacility,
   } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -258,16 +337,19 @@ export default function MapView(props: MapViewProps) {
   const readyRef = useRef(false);
   const observerRef = useRef<ResizeObserver | null>(null);
   const fallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rafRef = useRef<number | null>(null);
   const themeRef = useRef(theme);
   themeRef.current = theme;
+
   const onSelectRef = useRef(onSelectPoint);
   onSelectRef.current = onSelectPoint;
+  const onFacilityRef = useRef(onSelectFacility);
+  onFacilityRef.current = onSelectFacility;
 
   const setData = useCallback((id: string, data: GeoJSON.FeatureCollection) => {
     const map = mapRef.current;
     if (!map || !readyRef.current) return;
-    const source = map.getSource(id) as GeoJSONSource | undefined;
-    source?.setData(data);
+    (map.getSource(id) as GeoJSONSource | undefined)?.setData(data);
   }, []);
 
   /* Create the map once. */
@@ -280,13 +362,13 @@ export default function MapView(props: MapViewProps) {
       center: [-97.34, 37.69],
       zoom: 5,
       attributionControl: { compact: true },
+      // A gentle curve makes a flyTo read as travel rather than teleportation,
+      // which helps when the map jumps to a facility in a list.
+      fadeDuration: 150,
     });
     mapRef.current = map;
-    // Handy when diagnosing tile loading and camera problems in development.
     if (import.meta.env.DEV) (window as unknown as { __map?: maplibregl.Map }).__map = map;
 
-    // MapLibre swallows exceptions thrown inside its own handlers, which makes a
-    // half built style very hard to diagnose. Surface them instead.
     map.on('error', (e) => {
       console.error('[TornadoSight] map error', (e as { error?: unknown }).error ?? e);
     });
@@ -299,7 +381,18 @@ export default function MapView(props: MapViewProps) {
     map.addControl(new maplibregl.ScaleControl({ unit: 'imperial' }), 'bottom-left');
 
     const buildLayers = () => {
-      for (const id of ['alerts', 'corridor', 'path', 'stormhead', 'facilities', 'reports', 'picked']) {
+      for (const id of [
+        'alerts',
+        'corridor',
+        'path',
+        'pathticks',
+        'stormhead',
+        'trackline',
+        'trackdots',
+        'facilities',
+        'reports',
+        'picked',
+      ]) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -313,69 +406,187 @@ export default function MapView(props: MapViewProps) {
         id: 'radar-layer',
         type: 'raster',
         source: 'radar',
-        paint: { 'raster-opacity': 0.55 },
+        paint: { 'raster-opacity': 0.5 },
         layout: { visibility: 'none' },
       });
 
+      /* ---- warning polygons ---- */
       map.addLayer({
         id: 'alert-fill',
         type: 'fill',
         source: 'alerts',
-        paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.18 },
+        paint: {
+          'fill-color': ['get', 'color'],
+          'fill-opacity': ['case', ['==', ['get', 'urgent'], 1], 0.22, 0.1],
+        },
       });
       map.addLayer({
         id: 'alert-line',
         type: 'line',
         source: 'alerts',
-        paint: { 'line-color': ['get', 'color'], 'line-width': 2 },
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-width': ['case', ['==', ['get', 'urgent'], 1], 2.6, 1.4],
+          'line-opacity': ['case', ['==', ['get', 'urgent'], 1], 1, 0.75],
+        },
+      });
+      // A second outline, animated, only on tornado warnings.
+      map.addLayer({
+        id: 'alert-pulse',
+        type: 'line',
+        source: 'alerts',
+        filter: ['==', ['get', 'urgent'], 1],
+        paint: { 'line-color': '#ff2d2d', 'line-width': 7, 'line-opacity': 0.2, 'line-blur': 3 },
       });
 
+      /* ---- the track already travelled ---- */
+      map.addLayer({
+        id: 'track-line',
+        type: 'line',
+        source: 'trackline',
+        paint: { 'line-color': '#ff8a80', 'line-width': 2, 'line-opacity': 0.45, 'line-dasharray': [1, 1.6] },
+      });
+      map.addLayer({
+        id: 'track-dots',
+        type: 'circle',
+        source: 'trackdots',
+        paint: {
+          'circle-radius': 3.5,
+          'circle-color': '#ff8a80',
+          'circle-opacity': ['interpolate', ['linear'], ['get', 'age'], 0, 0.2, 1, 0.7],
+        },
+      });
+
+      /* ---- where it is going ---- */
       map.addLayer({
         id: 'corridor-fill',
         type: 'fill',
         source: 'corridor',
-        paint: { 'fill-color': '#ff2d2d', 'fill-opacity': 0.12 },
+        paint: { 'fill-color': '#ff2d2d', 'fill-opacity': 0.1 },
+      });
+      map.addLayer({
+        id: 'corridor-line',
+        type: 'line',
+        source: 'corridor',
+        paint: { 'line-color': '#ff2d2d', 'line-width': 1, 'line-opacity': 0.35 },
       });
       map.addLayer({
         id: 'path-line',
         type: 'line',
         source: 'path',
-        paint: { 'line-color': '#ff2d2d', 'line-width': 3, 'line-dasharray': [2, 1.5] },
+        paint: { 'line-color': '#ff2d2d', 'line-width': 3, 'line-dasharray': [2, 1.4], 'line-opacity': 0.9 },
       });
+      map.addLayer({
+        id: 'path-ticks',
+        type: 'circle',
+        source: 'pathticks',
+        paint: {
+          'circle-radius': 3,
+          'circle-color': '#0a0e14',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ff2d2d',
+        },
+      });
+      map.addLayer({
+        id: 'path-tick-labels',
+        type: 'symbol',
+        source: 'pathticks',
+        layout: {
+          'text-field': ['get', 'label'],
+          'text-size': 10,
+          'text-offset': [0, -1.1],
+          'text-allow-overlap': false,
+        },
+        paint: { 'text-color': '#ff8a80', 'text-halo-color': '#0a0e14', 'text-halo-width': 1.4 },
+      });
+
+      /* ---- the storm itself ---- */
       map.addLayer({
         id: 'stormhead-halo',
         type: 'circle',
         source: 'stormhead',
-        paint: {
-          'circle-radius': 14,
-          'circle-color': '#ff2d2d',
-          'circle-opacity': 0.25,
-        },
+        paint: { 'circle-radius': 16, 'circle-color': '#ff2d2d', 'circle-opacity': 0.18, 'circle-blur': 0.6 },
       });
       map.addLayer({
         id: 'stormhead-dot',
         type: 'circle',
         source: 'stormhead',
         paint: {
-          'circle-radius': 6,
+          'circle-radius': 7,
           'circle-color': '#ff2d2d',
-          'circle-stroke-width': 2,
+          'circle-stroke-width': 2.5,
           'circle-stroke-color': '#ffffff',
         },
       });
 
+      /* ---- infrastructure ---- */
       map.addLayer({
         id: 'facility-dot',
         type: 'circle',
         source: 'facilities',
         paint: {
-          'circle-radius': ['case', ['==', ['get', 'inPath'], 1], 7, 4],
+          'circle-radius': [
+            'case',
+            ['==', ['get', 'isHighlighted'], 1],
+            11,
+            ['==', ['get', 'inPath'], 1],
+            ['interpolate', ['linear'], ['get', 'rank'], 0, 5, 3, 8],
+            ['interpolate', ['linear'], ['get', 'rank'], 0, 3, 3, 5],
+          ],
           'circle-color': ['get', 'color'],
-          'circle-stroke-width': ['case', ['==', ['get', 'inPath'], 1], 2, 0.5],
-          'circle-stroke-color': ['case', ['==', ['get', 'inPath'], 1], '#ffffff', '#00000055'],
+          'circle-opacity': ['case', ['==', ['get', 'inPath'], 1], 1, 0.75],
+          'circle-stroke-width': [
+            'case',
+            ['==', ['get', 'isHighlighted'], 1],
+            3,
+            ['==', ['get', 'inPath'], 1],
+            2,
+            0.5,
+          ],
+          'circle-stroke-color': [
+            'case',
+            ['==', ['get', 'isHighlighted'], 1],
+            '#38bdf8',
+            ['==', ['get', 'inPath'], 1],
+            '#ffffff',
+            '#00000055',
+          ],
         },
       });
+      // A ring that only exists for the facility someone just clicked.
+      map.addLayer({
+        id: 'facility-focus',
+        type: 'circle',
+        source: 'facilities',
+        filter: ['==', ['get', 'isHighlighted'], 1],
+        paint: {
+          'circle-radius': 20,
+          'circle-color': 'transparent',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#38bdf8',
+          'circle-stroke-opacity': 0.8,
+        },
+      });
+      // Names only for what is in the path, or what was singled out. Labelling
+      // every school in a city would bury the four that matter.
+      map.addLayer({
+        id: 'facility-label',
+        type: 'symbol',
+        source: 'facilities',
+        filter: ['any', ['==', ['get', 'inPath'], 1], ['==', ['get', 'isHighlighted'], 1]],
+        layout: {
+          'text-field': ['get', 'label'],
+          'text-size': 11,
+          'text-offset': [0, 1.3],
+          'text-anchor': 'top',
+          'text-max-width': 12,
+          'text-allow-overlap': false,
+          'text-optional': true,
+        },
+        paint: { 'text-color': '#e8eef7', 'text-halo-color': '#0a0e14', 'text-halo-width': 1.6 },
+      });
 
+      /* ---- reports and the selected point ---- */
       map.addLayer({
         id: 'report-dot',
         type: 'circle',
@@ -387,7 +598,6 @@ export default function MapView(props: MapViewProps) {
           'circle-stroke-color': '#0a0e14',
         },
       });
-
       map.addLayer({
         id: 'picked-ring',
         type: 'circle',
@@ -400,36 +610,21 @@ export default function MapView(props: MapViewProps) {
         },
       });
 
+      // Place names last, so they sit above the warning shapes and a responder
+      // can still read which town is inside the red.
+      map.addLayer({ id: 'basemap-labels', type: 'raster', source: 'basemapLabels', paint: { 'raster-opacity': 0.9 } });
+
       readyRef.current = true;
       map.fire('tornadosight.ready');
     };
 
     /**
-     * Normally the layers go in on 'load', which is when MapLibre has the
-     * basemap style and its sources ready.
+     * Build on whichever event arrives first.
      *
-     * The fallback matters though. 'load' waits for every source in the basemap
-     * to settle, and this style carries a shaded relief layer that sometimes
-     * never does. When that happens the warning polygons, the storm corridor
-     * and the infrastructure markers are never added at all, and a responder is
-     * left looking at an empty rectangle during severe weather. So if 'load'
-     * has not arrived in a few seconds, build anyway: an operational picture
-     * drawn over a blank background still beats no picture.
-     */
-    /**
-     * Getting the overlays onto the map turned out to be the fiddliest part of
-     * this component, so the approach is deliberately belt and braces.
-     *
-     * `load` is the documented moment to add sources and layers, but it does
-     * not always arrive: it waits on a first render, and a browser that is
-     * throttling a backgrounded tab may never produce one. Waiting on it alone
-     * leaves a responder staring at an empty rectangle.
-     *
-     * Adding layers only really needs the style to be parsed, which `styledata`
-     * reports much earlier. So we listen for all three of `styledata`, `load`
-     * and `idle`, and whichever arrives first and succeeds wins. `built` is set
-     * only after `buildLayers` returns, so an attempt made a moment too early
-     * throws harmlessly and the next event retries.
+     * `load` is the documented moment, but it waits on a first render and never
+     * arrives in a throttled tab, which leaves a responder looking at an empty
+     * rectangle. `built` is set only after the build succeeds, so an attempt
+     * made a moment too early throws harmlessly and the next event retries.
      */
     let built = false;
     const tryBuild = () => {
@@ -438,31 +633,25 @@ export default function MapView(props: MapViewProps) {
         buildLayers();
         built = true;
       } catch {
-        // Too early. A later event will try again.
+        /* too early, a later event will retry */
       }
     };
-
     map.on('styledata', tryBuild);
     map.on('load', tryBuild);
     map.on('idle', tryBuild);
     tryBuild();
 
-    // Last resort: if none of those ever fired, say so rather than failing mute.
     fallbackRef.current = setTimeout(() => {
       tryBuild();
       if (!built) console.error('[TornadoSight] the map layers could not be built');
     }, 5000);
 
-    // The panel collapses and expands, and the bottom sheet changes height on a
-    // phone, so the canvas has to follow its container rather than only the
-    // window. Without this the map keeps whatever size it had at creation.
     const observer = new ResizeObserver(() => map.resize());
     observer.observe(containerRef.current);
     observerRef.current = observer;
 
+    /* ---- interaction ---- */
     map.on('click', (e) => {
-      // Clicking a facility or a report opens its detail instead of moving the
-      // selection, which is what a person expects from a marker.
       const hits = map.queryRenderedFeatures(e.point, { layers: ['facility-dot', 'report-dot'] });
       if (hits.length) return;
       onSelectRef.current({ lat: e.lngLat.lat, lon: e.lngLat.lng });
@@ -477,21 +666,36 @@ export default function MapView(props: MapViewProps) {
       });
     }
 
-    const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '260px' });
+    const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' });
 
     map.on('click', 'facility-dot', (e) => {
       const f = e.features?.[0];
       if (!f) return;
       const p = f.properties as Record<string, string | number>;
+      onFacilityRef.current(String(p.id));
       const timing =
         Number(p.minutes) >= 0
           ? `<strong style="color:#ff5252">In the projected path, about ${p.minutes} minutes away</strong>`
-          : `${p.distance} miles from the storm`;
+          : `${p.distance} miles from the storm, not in the projected path`;
       popup
         .setLngLat(e.lngLat)
         .setHTML(
           `<div style="font-size:13px;line-height:1.45"><strong>${escapeHtml(String(p.name))}</strong><br>` +
             `<span style="opacity:.75">${escapeHtml(String(p.kind).replace(/_/g, ' '))}</span><br>${timing}</div>`,
+        )
+        .addTo(map);
+    });
+
+    map.on('click', 'alert-fill', (e) => {
+      const f = e.features?.[0];
+      if (!f) return;
+      const p = f.properties as Record<string, string | number>;
+      popup
+        .setLngLat(e.lngLat)
+        .setHTML(
+          `<div style="font-size:13px;line-height:1.45"><strong>${escapeHtml(String(p.event))}</strong><br>` +
+            `<span style="opacity:.75">${escapeHtml(String(p.areaDesc))}</span><br>` +
+            `<span style="opacity:.6">${escapeHtml(String(p.sender))}</span></div>`,
         )
         .addTo(map);
     });
@@ -504,12 +708,39 @@ export default function MapView(props: MapViewProps) {
         .setLngLat(e.lngLat)
         .setHTML(
           `<div style="font-size:13px;line-height:1.45"><strong>${escapeHtml(String(p.event))}</strong><br>` +
-            `Radar placed the storm here, tracking ${p.heading}° at ${p.speed} mph.</div>`,
+            `Radar placed the storm here, tracking ${p.heading}&deg; at ${p.speed} mph.` +
+            (Number(p.observed) === 1
+              ? '<br><strong style="color:#ff5252">Tornado confirmed on the ground</strong>'
+              : '') +
+            `</div>`,
         )
         .addTo(map);
     });
 
+    /**
+     * The only animation on the map. A slow breath on the tornado warning
+     * outline and the storm head, so the eye is pulled to the one thing that
+     * matters without anything jumping.
+     */
+    const animate = () => {
+      if (readyRef.current && map.getLayer('alert-pulse')) {
+        const t = (Date.now() % 2200) / 2200;
+        const wave = 0.5 - 0.5 * Math.cos(t * Math.PI * 2);
+        try {
+          map.setPaintProperty('alert-pulse', 'line-width', 5 + wave * 7);
+          map.setPaintProperty('alert-pulse', 'line-opacity', 0.28 - wave * 0.16);
+          map.setPaintProperty('stormhead-halo', 'circle-radius', 14 + wave * 10);
+          map.setPaintProperty('stormhead-halo', 'circle-opacity', 0.26 - wave * 0.14);
+        } catch {
+          /* layer removed mid frame */
+        }
+      }
+      rafRef.current = requestAnimationFrame(animate);
+    };
+    rafRef.current = requestAnimationFrame(animate);
+
     return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (fallbackRef.current) clearTimeout(fallbackRef.current);
       observerRef.current?.disconnect();
       observerRef.current = null;
@@ -519,7 +750,7 @@ export default function MapView(props: MapViewProps) {
     };
   }, []);
 
-  /* Push data whenever it changes, waiting for the style to finish loading. */
+  /* Push data whenever it changes. */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -529,7 +760,11 @@ export default function MapView(props: MapViewProps) {
       setData('path', path.line);
       setData('corridor', path.corridor);
       setData('stormhead', path.head);
-      setData('facilities', showFacilities ? facilitiesToGeoJson(facilities) : EMPTY);
+      setData('pathticks', path.ticks);
+      const history = trackToGeoJson(track);
+      setData('trackline', history.line);
+      setData('trackdots', history.dots);
+      setData('facilities', showFacilities ? facilitiesToGeoJson(facilities, highlighted) : EMPTY);
       setData('reports', reportsToGeoJson(reports));
       setData(
         'picked',
@@ -545,7 +780,7 @@ export default function MapView(props: MapViewProps) {
     };
     if (readyRef.current) apply();
     else map.once('tornadosight.ready', apply);
-  }, [alerts, facilities, reports, point, tracked, projectionMinutes, showFacilities, setData]);
+  }, [alerts, facilities, reports, point, tracked, projectionMinutes, showFacilities, track, highlighted, setData]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -555,24 +790,23 @@ export default function MapView(props: MapViewProps) {
     }
   }, [showRadar]);
 
-  /**
-   * Swap the basemap tiles when the theme changes.
-   *
-   * Only the raster source is replaced, not the whole style, so the warning
-   * polygons, corridor and infrastructure layers stay exactly where they are
-   * and nothing has to be rebuilt.
-   */
+  /** Swap basemap tiles on a theme change, leaving the data layers untouched. */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const apply = () => {
-      const source = map.getSource('basemap') as { setTiles?: (t: string[]) => void } | undefined;
-      const url = BASEMAP[theme];
-      if (source?.setTiles) {
-        source.setTiles([url]);
-      }
+      const cfg = BASEMAP[theme];
+      (map.getSource('basemap') as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.([cfg.base]);
+      (map.getSource('basemapLabels') as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.([cfg.labels]);
       if (map.getLayer('background')) {
-        map.setPaintProperty('background', 'background-color', theme === 'dark' ? '#0a0e14' : '#eef1f6');
+        map.setPaintProperty('background', 'background-color', cfg.background);
+      }
+      const halo = theme === 'dark' ? '#0a0e14' : '#ffffff';
+      const text = theme === 'dark' ? '#e8eef7' : '#101722';
+      for (const id of ['facility-label', 'path-tick-labels']) {
+        if (!map.getLayer(id)) continue;
+        map.setPaintProperty(id, 'text-halo-color', halo);
+        if (id === 'facility-label') map.setPaintProperty(id, 'text-color', text);
       }
     };
     if (readyRef.current) apply();
@@ -588,7 +822,7 @@ export default function MapView(props: MapViewProps) {
           [fitBounds[0], fitBounds[1]],
           [fitBounds[2], fitBounds[3]],
         ],
-        { padding: 64, duration: 900, maxZoom: 11 },
+        { padding: 72, duration: 1100, maxZoom: 13, essential: true },
       );
     if (readyRef.current) apply();
     else map.once('tornadosight.ready', apply);

@@ -15,3 +15,6 @@ data/dataset/.metadata-*.json
 # TypeScript incremental build state
 *.tsbuildinfo
 
+
+# Labelled photographs for manual testing, generated from the dataset
+test-photos/

@@ -57,6 +57,23 @@ export interface Alert {
   maxHailInches: number | null;
   /** VTEC string, which identifies one event across its updates. */
   vtec: string | null;
+  /**
+   * Office, phenomenon and tracking number pulled out of the VTEC, which is
+   * what ties a first warning to every update that follows it for the same
+   * storm. Without this, successive products for one supercell look like
+   * unrelated alerts and there is no way to tell whether it is getting worse.
+   */
+  stormKey: string | null;
+}
+
+/**
+ * Parse the identity out of a VTEC string such as
+ * `/O.NEW.KLUB.TO.W.0004.000000T0000Z-260926T0415Z/`, giving `KLUB.TO.0004`.
+ */
+export function parseStormKey(vtec: string | null): string | null {
+  if (!vtec) return null;
+  const m = vtec.match(/\/[A-Z]\.[A-Z]{3}\.([A-Z]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\./);
+  return m ? `${m[1]}.${m[2]}.${m[4]}` : null;
 }
 
 /**
@@ -105,10 +122,16 @@ function asThreat(value: string | null): ThreatLevel {
   return null;
 }
 
-/** `60 MPH` or `60` becomes 60. */
-function parseGustMph(value: string | null): number | null {
+/**
+ * `60 MPH`, `60` or `1.75` becomes a number.
+ *
+ * The leading decimal point matters. Hail size arrives as `.75`, and a pattern
+ * that requires a digit before the point reads that as seventy five, which the
+ * interface then reported as "hail to 75 in".
+ */
+function parseMeasure(value: string | null): number | null {
   if (!value) return null;
-  const m = value.match(/(\d+(?:\.\d+)?)/);
+  const m = value.match(/(\d*\.\d+|\d+)/);
   return m ? Number(m[1]) : null;
 }
 
@@ -148,10 +171,11 @@ export function normalizeAlert(feature: any): Alert | null {
     tornadoDetection: asThreat(firstParam(params, 'tornadoDetection')),
     tornadoDamageThreat: firstParam(params, 'tornadoDamageThreat'),
     windThreat: asThreat(firstParam(params, 'windThreat')),
-    maxWindGustMph: parseGustMph(firstParam(params, 'maxWindGust')),
+    maxWindGustMph: parseMeasure(firstParam(params, 'maxWindGust')),
     hailThreat: asThreat(firstParam(params, 'hailThreat')),
-    maxHailInches: parseGustMph(firstParam(params, 'maxHailSize')),
+    maxHailInches: parseMeasure(firstParam(params, 'maxHailSize')),
     vtec: firstParam(params, 'VTEC'),
+    stormKey: parseStormKey(firstParam(params, 'VTEC')),
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */

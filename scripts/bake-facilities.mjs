@@ -80,20 +80,7 @@ async function overpass(body) {
   throw lastError;
 }
 
-const bbox = arg('bbox', '-104.6,33.6,-101.4,35.6').split(',').map(Number);
-const [west, south, east, north] = bbox;
-const slug = arg('name', 'region');
 
-console.log(`Baking facilities for ${west},${south} to ${east},${north}`);
-
-const area = `(${south},${west},${north},${east})`;
-const clauses = RULES.map((r) => `${r.query}${area};`).join('');
-const query = `[out:json][timeout:180];(${clauses});out center tags;`;
-
-const data = await overpass(query);
-console.log(`  Overpass returned ${data.elements.length} elements`);
-
-/** Classify an element by walking the rules in order. */
 function classify(tags = {}) {
   if (tags.amenity === 'hospital') return 'hospital';
   if (tags.amenity === 'nursing_home' || tags.social_facility === 'nursing_home') return 'nursing_home';
@@ -121,64 +108,140 @@ const NAMES = {
   other: 'Facility',
 };
 
-const cells = new Map();
-const seen = new Set();
-const counts = {};
 
-for (const el of data.elements) {
-  const lat = el.lat ?? el.center?.lat;
-  const lon = el.lon ?? el.center?.lon;
-  if (lat === undefined || lon === undefined) continue;
+/* ------------------------------------------------------------------ *
+ * Tiled baking
+ * ------------------------------------------------------------------ */
 
-  const kind = classify(el.tags);
-  // A hospital mapped as both a node and a building way would otherwise be
-  // counted twice and double its weight in the exposure score.
-  const dedupe = `${kind}:${lat.toFixed(4)}:${lon.toFixed(4)}`;
-  if (seen.has(dedupe)) continue;
-  seen.add(dedupe);
+/**
+ * A single Overpass query for anything larger than a county times out, so the
+ * region is cut into tiles and fetched one at a time. Each finished tile is
+ * written straight to disk, which makes the whole run resumable: a rerun skips
+ * tiles it already has instead of starting the several hours again.
+ */
+const bbox = arg('bbox', '-104.6,33.6,-101.4,35.6').split(',').map(Number);
+const [west, south, east, north] = bbox;
+const slug = arg('name', 'region');
 
-  const key = `${Math.floor(lat)}_${Math.floor(lon)}`;
-  if (!cells.has(key)) cells.set(key, []);
-  cells.get(key).push({
-    id: `${el.type[0]}${el.id}`,
-    kind,
-    name: el.tags?.name ?? NAMES[kind],
-    lat: Number(lat.toFixed(5)),
-    lon: Number(lon.toFixed(5)),
-  });
-  counts[kind] = (counts[kind] ?? 0) + 1;
-}
+const TILE_DEGREES = Number(arg('tile', '2'));
 
 const outDir = path.join(process.cwd(), 'public', 'data', 'facilities');
+const indexPath = path.join(outDir, 'index.json');
 await fs.mkdir(outDir, { recursive: true });
 
-let total = 0;
-const written = [];
-for (const [key, list] of cells) {
-  list.sort((a, b) => a.lat - b.lat);
-  await fs.writeFile(path.join(outDir, `${key}.json`), JSON.stringify(list));
-  written.push(key);
-  total += list.length;
+async function readIndex() {
+  try {
+    return JSON.parse(await fs.readFile(indexPath, 'utf8'));
+  } catch {
+    return { cells: [], regions: [], tiles: [] };
+  }
 }
 
-// An index so the app knows which cells are available offline without probing
-// for files that are not there.
-const indexPath = path.join(outDir, 'index.json');
-let index = { cells: [], regions: [] };
-try {
-  index = JSON.parse(await fs.readFile(indexPath, 'utf8'));
-} catch {
-  /* first run */
-}
-index.cells = [...new Set([...index.cells, ...written])].sort();
-index.regions = [
-  ...index.regions.filter((r) => r.name !== slug),
-  { name: slug, bbox, facilities: total, bakedAt: new Date().toISOString() },
-];
-await fs.writeFile(indexPath, JSON.stringify(index, null, 2));
+const index = await readIndex();
+index.tiles ??= [];
+const doneTiles = new Set(index.tiles);
 
-console.log(`\n  ${total} facilities across ${written.length} cells`);
+/** Merge new facilities into a one degree shard already on disk. */
+async function mergeCell(key, list) {
+  const file = path.join(outDir, `${key}.json`);
+  let existing = [];
+  try {
+    existing = JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch {
+    /* new shard */
+  }
+  const byId = new Map(existing.map((f) => [f.id, f]));
+  for (const f of list) byId.set(f.id, f);
+  const merged = [...byId.values()].sort((a, b) => a.lat - b.lat);
+  await fs.writeFile(file, JSON.stringify(merged));
+  return merged.length;
+}
+
+const tiles = [];
+for (let s = Math.floor(south); s < north; s += TILE_DEGREES) {
+  for (let w = Math.floor(west); w < east; w += TILE_DEGREES) {
+    tiles.push([w, s, Math.min(w + TILE_DEGREES, east), Math.min(s + TILE_DEGREES, north)]);
+  }
+}
+
+console.log(`Baking ${slug}: ${tiles.length} tiles of ${TILE_DEGREES} degrees`);
+
+const counts = {};
+let grandTotal = 0;
+let skipped = 0;
+let failed = 0;
+
+for (const [i, tile] of tiles.entries()) {
+  const [tw, ts, te, tn] = tile;
+  const tileKey = `${tw}_${ts}_${te}_${tn}`;
+  if (doneTiles.has(tileKey)) {
+    skipped++;
+    continue;
+  }
+
+  const area = `(${ts},${tw},${tn},${te})`;
+  const clauses = RULES.map((r) => `${r.query}${area};`).join('');
+  const query = `[out:json][timeout:300];(${clauses});out center tags;`;
+
+  process.stdout.write(`  [${i + 1}/${tiles.length}] ${tw},${ts} `);
+
+  let data;
+  try {
+    data = await overpass(query);
+  } catch (err) {
+    console.log(`failed: ${err.message}`);
+    failed++;
+    continue;
+  }
+
+  const cells = new Map();
+  const seen = new Set();
+  for (const el of data.elements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lon = el.lon ?? el.center?.lon;
+    if (lat === undefined || lon === undefined) continue;
+
+    const kind = classify(el.tags);
+    // A hospital mapped as both a node and a building way would otherwise be
+    // counted twice and double its weight in the exposure score.
+    const dedupe = `${kind}:${lat.toFixed(4)}:${lon.toFixed(4)}`;
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+
+    const key = `${Math.floor(lat)}_${Math.floor(lon)}`;
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push({
+      id: `${el.type[0]}${el.id}`,
+      kind,
+      name: el.tags?.name ?? NAMES[kind],
+      lat: Number(lat.toFixed(5)),
+      lon: Number(lon.toFixed(5)),
+    });
+    counts[kind] = (counts[kind] ?? 0) + 1;
+    grandTotal++;
+  }
+
+  for (const [key, list] of cells) {
+    await mergeCell(key, list);
+    if (!index.cells.includes(key)) index.cells.push(key);
+  }
+
+  index.tiles.push(tileKey);
+  doneTiles.add(tileKey);
+  index.cells.sort();
+  index.regions = [
+    ...index.regions.filter((r) => r.name !== slug),
+    { name: slug, bbox, bakedAt: new Date().toISOString() },
+  ];
+  // Checkpoint after every tile, so an interrupted run loses one tile at most.
+  await fs.writeFile(indexPath, JSON.stringify(index, null, 2));
+
+  console.log(`${data.elements.length} elements, ${cells.size} cells`);
+}
+
+console.log(`\n  ${grandTotal} facilities added across ${index.cells.length} cells`);
+if (skipped) console.log(`  ${skipped} tiles already done`);
+if (failed) console.log(`  ${failed} tiles failed, rerun to retry them`);
 for (const [k, v] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
   console.log(`    ${k.padEnd(20)} ${v}`);
 }
-console.log(`  wrote ${outDir}`);
