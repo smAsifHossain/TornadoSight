@@ -21,8 +21,16 @@ import path from 'node:path';
 const ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
+
+/**
+ * A pause between tiles. These are volunteer run servers and a nationwide bake
+ * is a lot to ask of them; hammering it earned a string of 429s that cost more
+ * time than the waiting does.
+ */
+const TILE_PAUSE_MS = 6000;
 
 const UA = 'TornadoSight/0.1 (IEEE Response Quest; emergency response research prototype)';
 
@@ -237,6 +245,7 @@ for (const [i, tile] of tiles.entries()) {
   await fs.writeFile(indexPath, JSON.stringify(index, null, 2));
 
   console.log(`${data.elements.length} elements, ${cells.size} cells`);
+  await sleep(TILE_PAUSE_MS);
 }
 
 console.log(`\n  ${grandTotal} facilities added across ${index.cells.length} cells`);
