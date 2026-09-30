@@ -66,10 +66,16 @@ const NEGATIVE = [
 
 /** Anything that is not a photograph of the sky. */
 const NOT_A_SKY_PHOTO =
-  /map|diagram|chart|graph|skew|sounding|radar|satellite|sigmet|damage|destroy|aftermath|debris|wreck|rubble|ruin|collaps|rebuild|recovery|shelter|memorial|monument|plaque|museum|poster|illustrat|drawing|engrav|painting|cartoon|sketch|lithograph|woodcut|etching|postcard|stamp|book|page|cover|logo|seal|portrait|statue|LCCN|DPLA|NARA|FEMA|census|newspaper|document|letter|report|sign|banner|count|track_map|path_of/i;
+  /map|diagram|chart|graph|skew|sounding|radar|satellite|sigmet|damage|destroy|aftermath|debris|wreck|rubble|ruin|collaps|rebuild|recovery|shelter|memorial|monument|plaque|museum|poster|illustrat|drawing|engrav|painting|cartoon|sketch|lithograph|woodcut|etching|postcard|stamp|book|page|cover|logo|seal|portrait|statue|LCCN|DPLA|NARA|FEMA|census|newspaper|document|letter|report|sign|banner|count|track_map|path_of|cleanup|clean-up|after the|restoration|relief|Collection|STS[-_ ]?[0-9]{2}|shuttle|anniversar|survivor|victim|funeral|church|school bus|trailer|mobile home|path|track|reflectivity|dBZ|WSR-88D|velocity|Mars|sol [0-9]|Ingenuity|Eridania|Perseverance|Curiosity|crater|pickup|truck|barrel|light pole|prelim/i;
 
-/** Words that mark an image as showing the phenomenon itself. */
-const IS_TORNADIC = /tornad|funnel|waterspout|landspout|twister|trombe|wirbel/i;
+/**
+ * Words that mark an image as showing the phenomenon itself.
+ *
+ * The Enhanced Fujita rating is included because cloud categories carry files
+ * named only for their rating, such as "Portage EF2.jpg". Without it those land
+ * in the negative class, which teaches the model that a tornado is not one.
+ */
+const IS_TORNADIC = /tornad|funnel|waterspout|landspout|twister|trombe|wirbel|\bEF[0-5]\b|\bEF-[0-5]\b/i;
 
 /** Licences we accept. Anything else is discarded rather than guessed at. */
 const FREE = /^(cc0|cc-by|cc-by-sa|pd|public domain|no restrictions)/i;
@@ -263,14 +269,7 @@ async function buildClass(name, groups) {
       await collect(g.cat, g.depth, new Set(), files);
       console.log(`  ${g.cat.padEnd(24)} +${files.size - before} (total ${files.size})`);
     }
-    // Filter on the title before spending API calls on licence lookups.
-    const wanted = [...files].filter((title) => {
-      if (NOT_A_SKY_PHOTO.test(title)) return false;
-      // Positives must name the phenomenon. Negatives must not: a category such
-      // as Wall clouds legitimately contains tornado photographs, and leaving
-      // those in the negative class teaches the model the opposite of the truth.
-      return name === 'tornado' ? IS_TORNADIC.test(title) : !IS_TORNADIC.test(title);
-    });
+    const wanted = [...files].filter((title) => keep(title, name));
     console.log(`  ${wanted.length} of ${files.size} look like photographs of the phenomenon`);
 
     process.stdout.write('  checking licences ');
@@ -281,9 +280,47 @@ async function buildClass(name, groups) {
     await fs.writeFile(cacheFile, JSON.stringify(described));
   }
 
+  /**
+   * Filter again here, not only before the licence lookup.
+   *
+   * The metadata cache is written before these rules existed on an earlier run,
+   * and reusing it skipped the filtering entirely: the positives came back full
+   * of path maps and radar grabs, and the negative class contained a
+   * photograph captioned "EF4 tornado near Barnsdall, Oklahoma". Filtering at
+   * the point of selection means the rules apply however the metadata arrived.
+   */
+  const before = described.length;
+  described = described.filter((item) => keep(item.title, name));
+  if (described.length !== before) {
+    console.log(`  ${described.length} of ${before} pass the content filter`);
+  }
+
   // Sorted rather than shuffled, so a rerun selects exactly the same images.
   described.sort((a, b) => (a.title < b.title ? -1 : 1));
-  return download(described, path.join(root, name), limit);
+  const saved = await download(described, path.join(root, name), limit);
+  await prune(path.join(root, name), saved);
+  return saved;
+}
+
+/** Whether a Commons title belongs in this class. */
+function keep(title, className) {
+  if (NOT_A_SKY_PHOTO.test(title)) return false;
+  // Positives must name the phenomenon. Negatives must not: a category such as
+  // Wall clouds legitimately contains tornado photographs, and leaving those in
+  // the negative class teaches the model the opposite of the truth.
+  return className === 'tornado' ? IS_TORNADIC.test(title) : !IS_TORNADIC.test(title);
+}
+
+/** Delete images left behind by an earlier, less strict selection. */
+async function prune(dir, saved) {
+  const keepNames = new Set(saved.map((s) => s.file));
+  let removed = 0;
+  for (const file of await fs.readdir(dir).catch(() => [])) {
+    if (keepNames.has(file)) continue;
+    await fs.unlink(path.join(dir, file)).catch(() => undefined);
+    removed++;
+  }
+  if (removed) console.log(`  removed ${removed} images that no longer qualify`);
 }
 
 const tornado = await buildClass('tornado', POSITIVE);

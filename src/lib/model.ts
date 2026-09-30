@@ -17,7 +17,16 @@
  * submitted, so the dashboard itself stays light on a phone.
  */
 
-import * as ort from 'onnxruntime-web';
+// The wasm-only entry point. The default bundle pulls the WebGPU build, which
+// is twice the size and unused here, because a static host cannot send the
+// cross origin isolation headers its threading needs anyway.
+import * as ort from 'onnxruntime-web/wasm';
+// Let the bundler resolve and emit the runtime's own WebAssembly assets, then
+// hand it the resulting URLs. Pointing it at files copied into public/ does not
+// work: the dev server appends an ?import query to the dynamic import and the
+// static handler will not serve that.
+import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
+import ortMjsUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url';
 
 const BASE = import.meta.env.BASE_URL ?? '/';
 const MODEL_URL = `${BASE}models/convnext-tiny-224-int8.onnx`;
@@ -67,6 +76,18 @@ export function modelIsWarm(): boolean {
 
 function loadSession(): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
+    /**
+     * Point the runtime at our own copy of its WebAssembly files.
+     *
+     * Left to itself it resolves them against the bundled module URL, misses,
+     * and gets index.html back from the dev server, which surfaces as a
+     * WebAssembly magic word error that says nothing about paths. Serving them
+     * from our own origin also means no CDN dependency, so the screener keeps
+     * working offline.
+     */
+    ort.env.wasm.wasmPaths = { wasm: ortWasmUrl, mjs: ortMjsUrl };
+    // Single threaded on purpose: multi threading needs cross origin isolation
+    // headers, which a static host like GitHub Pages cannot set.
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.simd = true;
     sessionPromise = ort.InferenceSession.create(MODEL_URL, {

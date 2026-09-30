@@ -19,6 +19,17 @@ import type { WeatherSnapshot } from '../lib/openmeteo';
  * street deserves to know where it goes.
  */
 
+/**
+ * Bundled public domain photographs, so the screener can be exercised without
+ * anyone having to go and find a storm. One clear funnel and two of the cloud
+ * forms most often mistaken for one.
+ */
+const SAMPLES = [
+  { file: 'funnel.jpg', label: 'Tornado' },
+  { file: 'shelf-cloud.jpg', label: 'Shelf cloud' },
+  { file: 'mammatus.jpg', label: 'Mammatus' },
+] as const;
+
 export interface ReportDraft {
   point: LatLon;
   photo: Blob | null;
@@ -79,6 +90,19 @@ export default function ReportDialog({ open, point, alerts, weather, facilities,
     setScreening(null);
     setStatus('idle');
     setError(null);
+  }
+
+  /** Load one of the bundled sample photographs and screen it like any other. */
+  async function useSample(sample: (typeof SAMPLES)[number]) {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL ?? '/'}samples/${sample.file}`);
+      if (!res.ok) throw new Error(`sample unavailable (${res.status})`);
+      const blob = await res.blob();
+      await handlePhoto(new File([blob], sample.file, { type: blob.type }));
+    } catch (err) {
+      setStatus('error');
+      setError(err instanceof Error ? `The sample could not be loaded: ${err.message}` : 'The sample could not be loaded.');
+    }
   }
 
   async function handlePhoto(file: File | undefined) {
@@ -190,6 +214,25 @@ export default function ReportDialog({ open, point, alerts, weather, facilities,
             Screened on this device. The picture is never uploaded, and a report can be filed
             without one.
           </p>
+
+          {/* Anyone evaluating this is unlikely to have a storm photograph to
+              hand, and a screener nobody can try is a screener nobody trusts. */}
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              Or try one:
+            </span>
+            {SAMPLES.map((s) => (
+              <button
+                key={s.file}
+                type="button"
+                onClick={() => void useSample(s)}
+                className="rounded px-2 py-1 text-[11px]"
+                style={{ background: 'var(--surface-raised)', color: 'var(--text-secondary)' }}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {preview ? (

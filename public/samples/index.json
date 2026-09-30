@@ -1,0 +1,29 @@
+[
+  {
+    "file": "funnel.jpg",
+    "label": "Tornado over a highway",
+    "truth": "tornado",
+    "title": "File:2015 Garland tornado CCTV 2.png",
+    "licence": "Public domain",
+    "author": "NTAA traffic cameras",
+    "source": "https://commons.wikimedia.org/wiki/File:2015_Garland_tornado_CCTV_2.png"
+  },
+  {
+    "file": "shelf-cloud.jpg",
+    "label": "Shelf cloud, a common look-alike",
+    "truth": "non_tornado",
+    "title": "File:Shelf Cloud Piracicaba 29-01-2024.jpg",
+    "licence": "CC0",
+    "author": "Erik dos Santos",
+    "source": "https://commons.wikimedia.org/wiki/File:Shelf_Cloud_Piracicaba_29-01-2024.jpg"
+  },
+  {
+    "file": "mammatus.jpg",
+    "label": "Mammatus cloud",
+    "truth": "non_tornado",
+    "title": "File:Imammatus clouds.jpg",
+    "licence": "CC0",
+    "author": "Glomar97",
+    "source": "https://commons.wikimedia.org/wiki/File:Imammatus_clouds.jpg"
+  }
+]
