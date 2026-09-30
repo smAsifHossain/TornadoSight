@@ -1,0 +1,176 @@
+@import 'tailwindcss';
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+/**
+ * TornadoSight is an operations console. The visual language borrows from the
+ * emergency management rooms it is meant for: dark by default so a projected
+ * screen does not glare, one loud colour reserved for danger so nothing else
+ * competes with it, and type large enough to read at arm's length.
+ *
+ * A light theme is included because a field responder holding a phone outdoors
+ * in daylight cannot read a dark one. Both are checked for WCAG AA contrast.
+ */
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace;
+}
+
+:root {
+  --surface-base: #0a0e14;
+  --surface-panel: #121822;
+  --surface-raised: #1a2230;
+  --surface-input: #0e141d;
+  --border-soft: #24303f;
+  --border-strong: #35455a;
+
+  --text-primary: #e8eef7;
+  --text-secondary: #a9b8cc;
+  --text-muted: #7387a0;
+
+  --accent: #38bdf8;
+  --accent-contrast: #062331;
+
+  --band-high: #ff5252;
+  --band-medium: #ffa726;
+  --band-low: #2dd4a7;
+  --band-review: #a78bfa;
+
+  --shadow-panel: 0 10px 30px rgb(0 0 0 / 0.45);
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --surface-base: #eef1f6;
+  --surface-panel: #ffffff;
+  --surface-raised: #f4f6fa;
+  --surface-input: #ffffff;
+  --border-soft: #d3dae5;
+  --border-strong: #b3bfd0;
+
+  --text-primary: #101722;
+  --text-secondary: #3f4e63;
+  --text-muted: #5d6e86;
+
+  --accent: #0369a1;
+  --accent-contrast: #ffffff;
+
+  --band-high: #c2170f;
+  --band-medium: #a25a00;
+  --band-low: #0f766e;
+  --band-review: #6d3fd4;
+
+  --shadow-panel: 0 10px 24px rgb(15 23 42 / 0.12);
+
+  color-scheme: light;
+}
+
+* {
+  min-width: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* Stops iOS Safari from inflating text in the panels when rotated. */
+  text-size-adjust: 100%;
+}
+
+/* A visible, consistent focus ring everywhere. Emergency software gets driven
+   by keyboard more often than its designers expect. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect a reduced motion preference, including for the replay animation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@utility panel {
+  background: var(--surface-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 0.75rem;
+}
+
+@utility skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  z-index: 100;
+  padding: 0.75rem 1rem;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+
+  &:focus {
+    left: 0.5rem;
+    top: 0.5rem;
+  }
+}
+
+/* Scrollbars that do not shout on a dark panel. */
+@supports (scrollbar-width: thin) {
+  .scroll-slim {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+}
+
+/* MapLibre ships light chrome; bring its controls into the theme. */
+.maplibregl-ctrl-group {
+  background: var(--surface-panel) !important;
+  border: 1px solid var(--border-soft) !important;
+}
+.maplibregl-ctrl-group button + button {
+  border-top: 1px solid var(--border-soft) !important;
+}
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: var(--map-ctrl-filter, invert(1) brightness(1.4));
+}
+:root[data-theme='light'] .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  --map-ctrl-filter: none;
+}
+.maplibregl-ctrl-attrib {
+  background: color-mix(in srgb, var(--surface-panel) 88%, transparent) !important;
+  color: var(--text-muted) !important;
+  font-size: 10px !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--text-secondary) !important;
+}
+.maplibregl-popup-content {
+  background: var(--surface-panel) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.5rem !important;
+  box-shadow: var(--shadow-panel) !important;
+  padding: 0.75rem 0.875rem !important;
+}
+.maplibregl-popup-tip {
+  border-top-color: var(--surface-panel) !important;
+  border-bottom-color: var(--surface-panel) !important;
+}
+.maplibregl-popup-close-button {
+  color: var(--text-secondary) !important;
+  font-size: 1.1rem !important;
+  padding: 0 0.35rem !important;
+}

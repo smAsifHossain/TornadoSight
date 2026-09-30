@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+.vite/
+
+# Training images and extracted features are large and reproducible from
+# scripts/build-dataset.mjs. The manifest, which records the licence and author
+# of every image used, is committed.
+data/dataset/tornado/
+data/dataset/non_tornado/
+data/dataset/.features.json
+data/dataset/.metadata-*.json
+
+# TypeScript incremental build state
+*.tsbuildinfo

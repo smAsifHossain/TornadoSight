@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="Near real time tornado situational awareness and storm report triage for emergency responders."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0a0e14" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)" />
+
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+
+    <!-- Warm up the live data origins before the first request goes out. -->
+    <link rel="preconnect" href="https://api.weather.gov" />
+    <link rel="preconnect" href="https://api.open-meteo.com" />
+    <link rel="dns-prefetch" href="https://tiles.openfreemap.org" />
+    <link rel="dns-prefetch" href="https://mesonet.agron.iastate.edu" />
+
+    <title>TornadoSight</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      TornadoSight needs JavaScript to read live National Weather Service data and draw the map.
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

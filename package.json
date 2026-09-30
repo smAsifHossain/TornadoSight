@@ -1,0 +1,44 @@
+{
+  "name": "tornadosight",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Near real time tornado situational awareness and report triage for emergency responders",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint src scripts",
+    "data:facilities": "node scripts/bake-facilities.mjs",
+    "model:build": "node scripts/build-model.mjs"
+  },
+  "dependencies": {
+    "maplibre-gl": "^5.6.0",
+    "onnxruntime-web": "^1.22.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@types/geojson": "^7946.0.16",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "^26.1.0",
+    "onnxruntime-node": "^1.30.0",
+    "oxlint": "^1.0.0",
+    "sharp": "^0.35.5",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.2.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "onnxruntime-node@1.30.0": true
+  }
+}
