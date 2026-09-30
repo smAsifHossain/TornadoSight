@@ -52,7 +52,7 @@ function PlaceSearch({ onPick }: { onPick: (p: Place) => void }) {
   }, []);
 
   return (
-    <div ref={boxRef} className="relative min-w-0 flex-1 sm:max-w-72">
+    <div ref={boxRef} className="relative order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1 sm:max-w-72">
       <label htmlFor={listId} className="sr-only">
         Search for a community, county or state
       </label>
@@ -172,7 +172,9 @@ export default function Header(props: HeaderProps) {
               <path d="M3 5h18M5 10h14M8 15h8M11 20h3" strokeLinecap="round" />
             </svg>
           </span>
-          TornadoSight
+          {/* The wordmark costs a third of a phone's header width, so on the
+              narrowest screens the mark alone carries it. */}
+          <span className="hidden min-[400px]:inline">TornadoSight</span>
         </h1>
 
         <div

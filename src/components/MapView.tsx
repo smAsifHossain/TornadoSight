@@ -14,10 +14,61 @@ import type { StoredReport } from '../lib/storage';
  * thing a person has to act on.
  */
 
-const VECTOR_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+/**
+ * A raster basemap rather than a vector style, on purpose.
+ *
+ * A hosted vector style was tried first and had to be dropped: it pulls a
+ * stylesheet, a sprite sheet, glyph ranges and two tile sources, and if any one
+ * of them stalls MapLibre never fires its load event, so the warning polygons
+ * are never drawn at all. That failure mode is unacceptable for a tool someone
+ * opens during a tornado warning.
+ *
+ * Raster tiles have one dependency and one failure mode: a tile is either there
+ * or it is not, and a missing tile costs a grey square rather than the entire
+ * operational picture. Carto publishes matched dark and light basemaps, so the
+ * theme switch changes the actual basemap instead of filtering a light one.
+ * Both are free and need no key.
+ */
+/**
+ * Esri's Canvas basemaps. Note the tile path is {z}/{y}/{x}, row before column,
+ * which is not the order MapLibre's template placeholders suggest.
+ *
+ * Carto was tried first and now returns an "API KEY REQUIRED" watermark tile
+ * with a 200 status, so a plain status check does not catch it. These Canvas
+ * layers need no key and are built as neutral backdrops for exactly this kind
+ * of data overlay: quiet grey, few labels, nothing competing with a red warning
+ * polygon.
+ */
+const BASEMAP: Record<'dark' | 'light', string> = {
+  dark: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+  light:
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+};
+const BASEMAP_ATTRIBUTION =
+  'Basemap: Esri, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 /** Iowa Environmental Mesonet NEXRAD base reflectivity, free and key-less. */
 const RADAR_TILES = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png';
+
+/** A minimal style built entirely in code, with no external stylesheet to fetch. */
+function baseStyle(theme: 'dark' | 'light'): maplibregl.StyleSpecification {
+  return {
+    version: 8,
+    sources: {
+      basemap: {
+        type: 'raster',
+        tiles: [BASEMAP[theme]],
+        tileSize: 256,
+        attribution: BASEMAP_ATTRIBUTION,
+        maxzoom: 20,
+      },
+    },
+    layers: [
+      { id: 'background', type: 'background', paint: { 'background-color': theme === 'dark' ? '#0a0e14' : '#eef1f6' } },
+      { id: 'basemap-layer', type: 'raster', source: 'basemap' },
+    ],
+  };
+}
 
 /**
  * Warning colours follow National Weather Service convention so that anyone who
@@ -206,6 +257,9 @@ export default function MapView(props: MapViewProps) {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const readyRef = useRef(false);
   const observerRef = useRef<ResizeObserver | null>(null);
+  const fallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const onSelectRef = useRef(onSelectPoint);
   onSelectRef.current = onSelectPoint;
 
@@ -222,12 +276,20 @@ export default function MapView(props: MapViewProps) {
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: VECTOR_STYLE,
+      style: baseStyle(themeRef.current),
       center: [-97.34, 37.69],
       zoom: 5,
       attributionControl: { compact: true },
     });
     mapRef.current = map;
+    // Handy when diagnosing tile loading and camera problems in development.
+    if (import.meta.env.DEV) (window as unknown as { __map?: maplibregl.Map }).__map = map;
+
+    // MapLibre swallows exceptions thrown inside its own handlers, which makes a
+    // half built style very hard to diagnose. Surface them instead.
+    map.on('error', (e) => {
+      console.error('[TornadoSight] map error', (e as { error?: unknown }).error ?? e);
+    });
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
     map.addControl(
@@ -236,7 +298,7 @@ export default function MapView(props: MapViewProps) {
     );
     map.addControl(new maplibregl.ScaleControl({ unit: 'imperial' }), 'bottom-left');
 
-    map.on('load', () => {
+    const buildLayers = () => {
       for (const id of ['alerts', 'corridor', 'path', 'stormhead', 'facilities', 'reports', 'picked']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
@@ -340,7 +402,56 @@ export default function MapView(props: MapViewProps) {
 
       readyRef.current = true;
       map.fire('tornadosight.ready');
-    });
+    };
+
+    /**
+     * Normally the layers go in on 'load', which is when MapLibre has the
+     * basemap style and its sources ready.
+     *
+     * The fallback matters though. 'load' waits for every source in the basemap
+     * to settle, and this style carries a shaded relief layer that sometimes
+     * never does. When that happens the warning polygons, the storm corridor
+     * and the infrastructure markers are never added at all, and a responder is
+     * left looking at an empty rectangle during severe weather. So if 'load'
+     * has not arrived in a few seconds, build anyway: an operational picture
+     * drawn over a blank background still beats no picture.
+     */
+    /**
+     * Getting the overlays onto the map turned out to be the fiddliest part of
+     * this component, so the approach is deliberately belt and braces.
+     *
+     * `load` is the documented moment to add sources and layers, but it does
+     * not always arrive: it waits on a first render, and a browser that is
+     * throttling a backgrounded tab may never produce one. Waiting on it alone
+     * leaves a responder staring at an empty rectangle.
+     *
+     * Adding layers only really needs the style to be parsed, which `styledata`
+     * reports much earlier. So we listen for all three of `styledata`, `load`
+     * and `idle`, and whichever arrives first and succeeds wins. `built` is set
+     * only after `buildLayers` returns, so an attempt made a moment too early
+     * throws harmlessly and the next event retries.
+     */
+    let built = false;
+    const tryBuild = () => {
+      if (built || !map.getStyle()?.layers?.length) return;
+      try {
+        buildLayers();
+        built = true;
+      } catch {
+        // Too early. A later event will try again.
+      }
+    };
+
+    map.on('styledata', tryBuild);
+    map.on('load', tryBuild);
+    map.on('idle', tryBuild);
+    tryBuild();
+
+    // Last resort: if none of those ever fired, say so rather than failing mute.
+    fallbackRef.current = setTimeout(() => {
+      tryBuild();
+      if (!built) console.error('[TornadoSight] the map layers could not be built');
+    }, 5000);
 
     // The panel collapses and expands, and the bottom sheet changes height on a
     // phone, so the canvas has to follow its container rather than only the
@@ -399,6 +510,7 @@ export default function MapView(props: MapViewProps) {
     });
 
     return () => {
+      if (fallbackRef.current) clearTimeout(fallbackRef.current);
       observerRef.current?.disconnect();
       observerRef.current = null;
       map.remove();
@@ -443,14 +555,25 @@ export default function MapView(props: MapViewProps) {
     }
   }, [showRadar]);
 
-  /* Dim the basemap in dark mode so the warning colours carry the screen. */
+  /**
+   * Swap the basemap tiles when the theme changes.
+   *
+   * Only the raster source is replaced, not the whole style, so the warning
+   * polygons, corridor and infrastructure layers stay exactly where they are
+   * and nothing has to be rebuilt.
+   */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const apply = () => {
-      const canvas = map.getCanvasContainer();
-      canvas.style.filter =
-        theme === 'dark' ? 'brightness(0.62) saturate(0.75) contrast(1.06)' : 'none';
+      const source = map.getSource('basemap') as { setTiles?: (t: string[]) => void } | undefined;
+      const url = BASEMAP[theme];
+      if (source?.setTiles) {
+        source.setTiles([url]);
+      }
+      if (map.getLayer('background')) {
+        map.setPaintProperty('background', 'background-color', theme === 'dark' ? '#0a0e14' : '#eef1f6');
+      }
     };
     if (readyRef.current) apply();
     else map.once('tornadosight.ready', apply);

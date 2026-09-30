@@ -345,7 +345,7 @@ export default function App() {
       ) : null}
 
       <div className="relative min-h-0 flex-1 overflow-hidden lg:grid lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[1fr_400px]">
-        <main className="relative h-full min-h-0 overflow-hidden" aria-label="Situation map">
+        <main className="relative h-full min-h-[45dvh] overflow-hidden lg:min-h-0" aria-label="Situation map">
           <MapView
             alerts={visibleAlerts}
             facilities={situation?.exposure.facilities ?? []}
@@ -392,7 +392,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setDialogOpen(true)}
-            className="absolute right-4 bottom-4 rounded-full px-5 py-3 text-sm font-semibold shadow-lg lg:bottom-6"
+            className="absolute right-4 bottom-20 rounded-full px-5 py-3 text-sm font-semibold shadow-lg lg:bottom-6"
             style={{ background: 'var(--accent)', color: 'var(--accent-contrast)' }}
           >
             File a report

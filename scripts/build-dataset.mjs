@@ -5,16 +5,15 @@
  *
  * First, licensing. The Phase 2 concept listed CNN, AccuWeather, Fox News and a
  * storm chasing video site among its sources. Those are not openly licensed,
- * and "responsible data handling" is one of the five scored criteria, so none
- * of them are used. Every image here carries a recorded licence and author in
+ * and responsible data handling is one of the five scored criteria, so none of
+ * them are used. Every image carries a recorded licence and author in
  * data/dataset/manifest.json, and anything without a free licence is dropped.
  *
  * Second, the negatives are hard negatives. A classifier trained to separate
  * tornadoes from random photographs learns "is this a dramatic sky", which is
  * useless to a responder: every shelf cloud and rain shaft would come back as a
- * tornado. The negative classes here are exactly the things the concept says
- * get mistaken for tornadoes, wall clouds, shelf clouds, mammatus, rain shafts,
- * dust plumes, so the model has to learn the funnel itself.
+ * tornado. The negative classes here are the things a spotter genuinely
+ * confuses with a funnel, so the model has to learn the funnel itself.
  *
  *   node scripts/build-dataset.mjs --limit 700
  */
@@ -27,37 +26,50 @@ const UA =
   'TornadoSight/0.1 (https://github.com/smAsifHossain/TornadoSight; IEEE Response Quest research prototype)';
 const THUMB_PX = 384;
 
+/**
+ * Positives are photographs of a funnel in the sky. The broad Tornadoes tree
+ * was tried first and had to be abandoned: it is mostly damage surveys, path
+ * maps, annual count charts and archival scans, none of which is what a spotter
+ * points a phone at. Titles are filtered to the phenomenon and away from the
+ * aftermath.
+ */
 const POSITIVE = [
-  { cat: 'Tornadoes', depth: 3 },
-  { cat: 'Funnel_clouds', depth: 2 },
-  { cat: 'Landspouts', depth: 1 },
+  { cat: 'Funnel_clouds', depth: 1 },
   { cat: 'Waterspouts', depth: 2 },
+  { cat: 'Landspouts', depth: 1 },
+  { cat: 'Tornadoes_in_the_United_States', depth: 2 },
+  { cat: 'Tornadoes_in_Canada', depth: 2 },
+  { cat: 'Tornadoes_in_Europe', depth: 2 },
+  { cat: 'Tornadoes_in_Australia', depth: 1 },
 ];
 
 /**
- * Shallow on purpose. Depth 3 on a category like Cumulonimbus or Rain walks
- * tens of thousands of files and takes longer than it is worth, while the
- * negatives that actually teach the model something are the specific cloud
- * forms a spotter confuses with a funnel. Quality of confusion beats volume.
+ * Negatives are the cloud forms a spotter actually confuses with a funnel.
+ * Shallow and specific: a broad category like Rain or Lightning drags in
+ * paintings, rainfall maps and press photographs of unrelated subjects, and a
+ * model trained against those learns to tell photographs from engravings.
  */
 const NEGATIVE = [
-  { cat: 'Shelf_clouds', depth: 1 },
-  { cat: 'Wall_clouds', depth: 1 },
-  { cat: 'Mammatus_clouds', depth: 1 },
-  { cat: 'Arcus_clouds', depth: 1 },
-  { cat: 'Funnel-shaped_clouds', depth: 1 },
-  { cat: 'Cumulonimbus_clouds_by_country', depth: 1 },
-  { cat: 'Supercells', depth: 1 },
+  { cat: 'Shelf_clouds', depth: 2 },
+  { cat: 'Wall_clouds', depth: 2 },
+  { cat: 'Mammatus_clouds', depth: 2 },
+  { cat: 'Arcus_clouds', depth: 2 },
+  { cat: 'Cumulonimbus_clouds', depth: 2 },
+  { cat: 'Supercells', depth: 2 },
   { cat: 'Squall_lines', depth: 1 },
-  { cat: 'Rain_shafts', depth: 1 },
   { cat: 'Virga', depth: 1 },
-  { cat: 'Dust_devils', depth: 1 },
+  { cat: 'Roll_clouds', depth: 1 },
+  { cat: 'Dust_devils', depth: 2 },
   { cat: 'Haboobs', depth: 1 },
-  { cat: 'Smoke_plumes', depth: 1 },
-  { cat: 'Storm_clouds', depth: 1 },
-  { cat: 'Thunderstorms_by_country', depth: 1 },
-  { cat: 'Dark_clouds', depth: 1 },
+  { cat: 'Thunderstorm_clouds', depth: 1 },
 ];
+
+/** Anything that is not a photograph of the sky. */
+const NOT_A_SKY_PHOTO =
+  /map|diagram|chart|graph|skew|sounding|radar|satellite|sigmet|damage|destroy|aftermath|debris|wreck|rubble|ruin|collaps|rebuild|recovery|shelter|memorial|monument|plaque|museum|poster|illustrat|drawing|engrav|painting|cartoon|sketch|lithograph|woodcut|etching|postcard|stamp|book|page|cover|logo|seal|portrait|statue|LCCN|DPLA|NARA|FEMA|census|newspaper|document|letter|report|sign|banner|count|track_map|path_of/i;
+
+/** Words that mark an image as showing the phenomenon itself. */
+const IS_TORNADIC = /tornad|funnel|waterspout|landspout|twister|trombe|wirbel/i;
 
 /** Licences we accept. Anything else is discarded rather than guessed at. */
 const FREE = /^(cc0|cc-by|cc-by-sa|pd|public domain|no restrictions)/i;
@@ -251,9 +263,19 @@ async function buildClass(name, groups) {
       await collect(g.cat, g.depth, new Set(), files);
       console.log(`  ${g.cat.padEnd(24)} +${files.size - before} (total ${files.size})`);
     }
-    process.stdout.write(`  checking licences of ${files.size} files `);
+    // Filter on the title before spending API calls on licence lookups.
+    const wanted = [...files].filter((title) => {
+      if (NOT_A_SKY_PHOTO.test(title)) return false;
+      // Positives must name the phenomenon. Negatives must not: a category such
+      // as Wall clouds legitimately contains tornado photographs, and leaving
+      // those in the negative class teaches the model the opposite of the truth.
+      return name === 'tornado' ? IS_TORNADIC.test(title) : !IS_TORNADIC.test(title);
+    });
+    console.log(`  ${wanted.length} of ${files.size} look like photographs of the phenomenon`);
+
+    process.stdout.write('  checking licences ');
     // Ask for headroom over the download limit so rejects do not starve the class.
-    described = await describe([...files].sort(), Math.ceil(limit * 1.6), cacheFile);
+    described = await describe(wanted.sort(), Math.ceil(limit * 1.6), cacheFile);
     console.log(`\n  ${described.length} freely licensed`);
     await fs.mkdir(root, { recursive: true });
     await fs.writeFile(cacheFile, JSON.stringify(described));
