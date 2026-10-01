@@ -135,6 +135,9 @@ export interface HeaderProps {
   onTornadoesOnly: (v: boolean) => void;
   /** Tornado products available before the filter, for the toggle's label. */
   tornadoCount: number;
+  /** Replay rate, in simulated minutes per real second. */
+  speed: number;
+  onSpeed: (s: number) => void;
 }
 
 export default function Header(props: HeaderProps) {
@@ -159,6 +162,8 @@ export default function Header(props: HeaderProps) {
     tornadoesOnly,
     onTornadoesOnly,
     tornadoCount,
+    speed,
+    onSpeed,
   } = props;
 
   const replaying = mode === 'replay';
@@ -281,6 +286,25 @@ export default function Header(props: HeaderProps) {
               >
                 {playing ? 'Pause' : 'Play'}
               </button>
+
+              {/* Two hours of storm is a long watch at life speed. */}
+              <div className="flex rounded-lg p-0.5" style={{ background: 'var(--surface-raised)' }}>
+                {[2, 4, 10].map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => onSpeed(s)}
+                    aria-pressed={speed === s}
+                    className="rounded px-1.5 py-0.5 text-[10px] font-semibold tabular-nums"
+                    style={{
+                      background: speed === s ? 'var(--band-review)' : 'transparent',
+                      color: speed === s ? '#fff' : 'var(--text-muted)',
+                    }}
+                  >
+                    {s}x
+                  </button>
+                ))}
+              </div>
 
               <label className="flex min-w-40 flex-1 items-center gap-2 text-[11px]">
                 <span className="sr-only">Scrub through the event</span>

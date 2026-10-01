@@ -8,7 +8,7 @@ import Header from './components/Header';
 import { fetchActiveAlerts, type Alert } from './lib/nws';
 import { fetchWeather, type WeatherSnapshot } from './lib/openmeteo';
 import { loadFacilities, type FacilitySource } from './lib/facilities';
-import { buildSituation, type Situation } from './lib/situation';
+import { alertAnchor, buildSituation, type Situation } from './lib/situation';
 import { boundsOf, type LatLon } from './lib/geo';
 import type { Facility } from './lib/scoring';
 import {
@@ -86,13 +86,21 @@ export default function App() {
   const [showFacilities, setShowFacilities] = useState(true);
   const [fitBounds, setFitBounds] = useState<[number, number, number, number] | null>(null);
   const [highlighted, setHighlighted] = useState<string | null>(null);
+  /** Tornado warnings that appeared since the last poll, newest first. */
+  const [breaking, setBreaking] = useState<Alert[]>([]);
+  const seenTornadoes = useRef<Set<string> | null>(null);
+  const [radarFrame, setRadarFrame] = useState<{ frame: number; total: number } | null>(null);
+  /** Replay playback rate, in simulated minutes per real second. */
+  const [speed, setSpeed] = useState(4);
   /** Show only storms that actually carry a tornado warning. */
   const [tornadoesOnly, setTornadoesOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   /* A slow tick so every relative time on screen stays honest. */
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 15_000);
+    // One second, not fifteen. An expiry that counts down reads as live; one
+    // that jumps in fifteen second steps reads as a screenshot.
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -104,6 +112,23 @@ export default function App() {
     setLoading(true);
     try {
       const next = await fetchActiveAlerts();
+
+      /**
+       * Notice a tornado warning that was not there a minute ago.
+       *
+       * This is the one thing in the feed that should interrupt someone. The
+       * first poll only records what already exists, so opening the app during
+       * an ongoing outbreak does not announce twenty warnings as breaking news.
+       */
+      const tornadoes = next.filter((a) => a.event === 'Tornado Warning');
+      if (seenTornadoes.current === null) {
+        seenTornadoes.current = new Set(tornadoes.map((a) => a.id));
+      } else {
+        const fresh = tornadoes.filter((a) => !seenTornadoes.current!.has(a.id));
+        for (const a of tornadoes) seenTornadoes.current.add(a.id);
+        if (fresh.length) setBreaking((prev) => [...fresh, ...prev].slice(0, 4));
+      }
+
       setAlerts(next);
       setLastUpdated(new Date());
       setError(null);
@@ -163,7 +188,7 @@ export default function App() {
     const id = setInterval(() => {
       setReplayAt((current) => {
         if (!current) return current;
-        const next = new Date(current.getTime() + 60_000);
+        const next = new Date(current.getTime() + speed * 60_000 * 0.1);
         if (next > replay.window.end) {
           setPlaying(false);
           return replay.window.end;
@@ -172,7 +197,7 @@ export default function App() {
       });
     }, 250);
     return () => clearInterval(id);
-  }, [mode, replay, playing]);
+  }, [mode, replay, playing, speed]);
 
   /** Everything on screen before the tornado filter. */
   const sourceAlerts = useMemo(() => {
@@ -393,6 +418,8 @@ export default function App() {
         tornadoesOnly={tornadoesOnly}
         onTornadoesOnly={setTornadoesOnly}
         tornadoCount={tornadoCount}
+        speed={speed}
+        onSpeed={setSpeed}
       />
 
       {error ? (
@@ -429,7 +456,59 @@ export default function App() {
               setPoint(p);
             }}
             onSelectFacility={setHighlighted}
+            onRadarFrame={(frame, total) => setRadarFrame({ frame, total })}
           />
+
+          {/* A tornado warning that appeared since the last poll. The only
+              thing in the feed allowed to interrupt. */}
+          {breaking.length ? (
+            <div className="absolute top-3 right-3 left-3 z-20 flex flex-col gap-2 lg:left-auto lg:w-80">
+              {breaking.map((a) => (
+                <div
+                  key={a.id}
+                  role="alert"
+                  className="pointer-events-auto rounded-lg border px-3 py-2 shadow-lg"
+                  style={{
+                    background: 'color-mix(in srgb, var(--band-high) 20%, var(--surface-panel))',
+                    borderColor: 'var(--band-high)',
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-bold" style={{ color: 'var(--band-high)' }}>
+                      New tornado warning
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setBreaking((prev) => prev.filter((b) => b.id !== a.id))}
+                      className="text-xs"
+                      style={{ color: 'var(--text-muted)' }}
+                      aria-label="Dismiss"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <p className="mt-0.5 text-xs" style={{ color: 'var(--text-primary)' }}>
+                    {a.areaDesc}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const at = a.motion?.position ?? alertAnchor(a);
+                      if (at) {
+                        setPoint(at);
+                        setFitBounds([at.lon - 0.5, at.lat - 0.4, at.lon + 0.5, at.lat + 0.4]);
+                      }
+                      setBreaking((prev) => prev.filter((b) => b.id !== a.id));
+                    }}
+                    className="mt-1.5 rounded px-2 py-1 text-[11px] font-semibold"
+                    style={{ background: 'var(--band-high)', color: '#fff' }}
+                  >
+                    Go to it
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           <div className="pointer-events-none absolute top-3 left-3 flex flex-col gap-2">
             <div
@@ -439,6 +518,15 @@ export default function App() {
               {mode === 'live' ? (
                 <LayerToggle active={showRadar} onClick={() => setShowRadar((v) => !v)}>
                   Radar
+                  {/* A loop is only useful if you can tell which moment you are
+                      looking at, so the frame labels itself. */}
+                  {showRadar && radarFrame ? (
+                    <span className="ml-1 tabular-nums opacity-80">
+                      {radarFrame.frame === radarFrame.total - 1
+                        ? 'now'
+                        : `-${(radarFrame.total - 1 - radarFrame.frame) * 5}m`}
+                    </span>
+                  ) : null}
                 </LayerToggle>
               ) : null}
               <LayerToggle active={showFacilities} onClick={() => setShowFacilities((v) => !v)}>

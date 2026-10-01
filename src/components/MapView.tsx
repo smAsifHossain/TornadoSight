@@ -50,9 +50,21 @@ const BASEMAP = {
 const BASEMAP_ATTRIBUTION =
   'Basemap: Esri, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
-/** Iowa Environmental Mesonet NEXRAD base reflectivity, free and key-less. */
-const RADAR_TILES =
-  'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png';
+/**
+ * Iowa Environmental Mesonet NEXRAD base reflectivity, free and key-less.
+ *
+ * They publish the same mosaic at five minute offsets into the past, which is
+ * what makes a loop possible. A still radar frame tells you where the rain is;
+ * a loop tells you where it is going, and that is the question a responder is
+ * actually asking. Oldest first, so the animation runs forward in time.
+ */
+const RADAR_FRAMES = ['m25m', 'm20m', 'm15m', 'm10m', 'm05m', ''] as const;
+const radarTiles = (offset: string) =>
+  `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913${offset ? `-${offset}` : ''}/{z}/{x}/{y}.png`;
+
+/** How long each radar frame holds, with a pause on the newest one. */
+const RADAR_FRAME_MS = 420;
+const RADAR_HOLD_MS = 900;
 
 function baseStyle(theme: 'dark' | 'light'): maplibregl.StyleSpecification {
   const cfg = BASEMAP[theme];
@@ -130,6 +142,8 @@ export interface MapViewProps {
   highlighted: string | null;
   onSelectPoint: (p: LatLon) => void;
   onSelectFacility: (id: string) => void;
+  /** Fires as the radar loop advances, so the caption can say how old a frame is. */
+  onRadarFrame?: (frame: number, total: number) => void;
 }
 
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -330,6 +344,7 @@ export default function MapView(props: MapViewProps) {
     highlighted,
     onSelectPoint,
     onSelectFacility,
+    onRadarFrame,
   } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -345,6 +360,8 @@ export default function MapView(props: MapViewProps) {
   onSelectRef.current = onSelectPoint;
   const onFacilityRef = useRef(onSelectFacility);
   onFacilityRef.current = onSelectFacility;
+  const onRadarFrameRef = useRef(onRadarFrame);
+  onRadarFrameRef.current = onRadarFrame;
 
   const setData = useCallback((id: string, data: GeoJSON.FeatureCollection) => {
     const map = mapRef.current;
@@ -396,18 +413,20 @@ export default function MapView(props: MapViewProps) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
-      map.addSource('radar', {
-        type: 'raster',
-        tiles: [RADAR_TILES],
-        tileSize: 256,
-        attribution: 'Radar: Iowa Environmental Mesonet',
-      });
-      map.addLayer({
-        id: 'radar-layer',
-        type: 'raster',
-        source: 'radar',
-        paint: { 'raster-opacity': 0.5 },
-        layout: { visibility: 'none' },
+      RADAR_FRAMES.forEach((offset, i) => {
+        map.addSource(`radar${i}`, {
+          type: 'raster',
+          tiles: [radarTiles(offset)],
+          tileSize: 256,
+          attribution: i === 0 ? 'Radar: Iowa Environmental Mesonet' : undefined,
+        });
+        map.addLayer({
+          id: `radar-layer-${i}`,
+          type: 'raster',
+          source: `radar${i}`,
+          paint: { 'raster-opacity': 0, 'raster-fade-duration': 0 },
+          layout: { visibility: 'none' },
+        });
       });
 
       /* ---- warning polygons ---- */
@@ -553,6 +572,18 @@ export default function MapView(props: MapViewProps) {
           ],
         },
       });
+      map.addLayer({
+        id: 'facility-hover',
+        type: 'circle',
+        source: 'facilities',
+        filter: ['==', ['get', 'id'], '__none__'],
+        paint: {
+          'circle-radius': 14,
+          'circle-color': ['get', 'color'],
+          'circle-opacity': 0.28,
+        },
+      });
+
       // A ring that only exists for the facility someone just clicked.
       map.addLayer({
         id: 'facility-focus',
@@ -665,6 +696,24 @@ export default function MapView(props: MapViewProps) {
         map.getCanvas().style.cursor = '';
       });
     }
+
+    // Grow the facility under the pointer. Small, but it makes a field of dots
+    // feel like a set of things rather than a texture.
+    let hovered: string | null = null;
+    map.on('mousemove', 'facility-dot', (e) => {
+      const id = e.features?.[0]?.properties?.id as string | undefined;
+      if (!id || id === hovered) return;
+      hovered = id;
+      if (map.getLayer('facility-hover')) {
+        map.setFilter('facility-hover', ['==', ['get', 'id'], id]);
+      }
+    });
+    map.on('mouseleave', 'facility-dot', () => {
+      hovered = null;
+      if (map.getLayer('facility-hover')) {
+        map.setFilter('facility-hover', ['==', ['get', 'id'], '__none__']);
+      }
+    });
 
     const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' });
 
@@ -782,12 +831,63 @@ export default function MapView(props: MapViewProps) {
     else map.once('tornadosight.ready', apply);
   }, [alerts, facilities, reports, point, tracked, projectionMinutes, showFacilities, track, highlighted, setData]);
 
+  /**
+   * Run the radar loop.
+   *
+   * Every frame is kept visible but transparent rather than hidden, so the
+   * tiles stay warm in the tile cache and the loop does not stutter on its
+   * second pass while a hidden layer refetches. Only opacity changes.
+   */
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
-    if (map.getLayer('radar-layer')) {
-      map.setLayoutProperty('radar-layer', 'visibility', showRadar ? 'visible' : 'none');
-    }
+    if (!map) return;
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let frame = 0;
+
+    const clearAll = () => {
+      for (let i = 0; i < RADAR_FRAMES.length; i++) {
+        const id = `radar-layer-${i}`;
+        if (!map.getLayer(id)) continue;
+        map.setLayoutProperty(id, 'visibility', 'none');
+        map.setPaintProperty(id, 'raster-opacity', 0);
+      }
+    };
+
+    const step = () => {
+      if (!map.getLayer('radar-layer-0')) return;
+      for (let i = 0; i < RADAR_FRAMES.length; i++) {
+        const id = `radar-layer-${i}`;
+        if (!map.getLayer(id)) continue;
+        map.setPaintProperty(id, 'raster-opacity', i === frame ? 0.55 : 0);
+      }
+      onRadarFrameRef.current?.(frame, RADAR_FRAMES.length);
+      // Hold a beat on the newest frame, the way every radar loop does, so the
+      // eye can register where the storm ended up before it jumps back.
+      const isNewest = frame === RADAR_FRAMES.length - 1;
+      frame = (frame + 1) % RADAR_FRAMES.length;
+      timer = setTimeout(step, isNewest ? RADAR_HOLD_MS : RADAR_FRAME_MS);
+    };
+
+    const start = () => {
+      if (!showRadar) {
+        clearAll();
+        return;
+      }
+      for (let i = 0; i < RADAR_FRAMES.length; i++) {
+        const id = `radar-layer-${i}`;
+        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
+      }
+      frame = 0;
+      step();
+    };
+
+    if (readyRef.current) start();
+    else map.once('tornadosight.ready', start);
+
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [showRadar]);
 
   /** Swap basemap tiles on a theme change, leaving the data layers untouched. */
