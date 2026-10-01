@@ -18,3 +18,6 @@ data/dataset/.metadata-*.json
 
 # Labelled photographs for manual testing, generated from the dataset
 test-photos/
+
+# Scratch list of cells needing a rebake
+gaps.json

@@ -77,7 +77,20 @@ async function overpass(body) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       if (!text.trimStart().startsWith('{')) throw new Error('non JSON response');
-      return JSON.parse(text);
+      const data = JSON.parse(text);
+
+      /**
+       * Overpass reports a timed out or aborted query as HTTP 200 with valid
+       * JSON, an empty element list, and the real story tucked into `remark`.
+       * Without this check a timeout counts as a successful empty tile, gets
+       * marked done, and never retries: that is how Oklahoma City ended up with
+       * no hospitals while the run reported zero failures.
+       */
+      if (typeof data.remark === 'string' && /error|timed out|timeout|abort/i.test(data.remark)) {
+        throw new Error(`Overpass remark: ${data.remark.slice(0, 80)}`);
+      }
+
+      return data;
     } catch (err) {
       lastError = err;
       const wait = 4000 * (attempt + 1);
@@ -165,10 +178,27 @@ async function mergeCell(key, list) {
   return merged.length;
 }
 
+/**
+ * Either walk a bounding box in tiles, or fill a specific list of one degree
+ * cells given as `--cells=file.json` holding `[[lon, lat], ...]`.
+ *
+ * The second mode exists because a large tile can come back *partially*: the
+ * Oklahoma City tile reported success and delivered two of its nine cells, so
+ * the state with the most tornadoes in the country had no hospitals in it. One
+ * degree requests are small enough not to truncate, so gaps are refilled at
+ * that size rather than by redoing hours of good work.
+ */
+const cellsFile = arg('cells', null);
 const tiles = [];
-for (let s = Math.floor(south); s < north; s += TILE_DEGREES) {
-  for (let w = Math.floor(west); w < east; w += TILE_DEGREES) {
-    tiles.push([w, s, Math.min(w + TILE_DEGREES, east), Math.min(s + TILE_DEGREES, north)]);
+
+if (cellsFile) {
+  const wanted = JSON.parse(await fs.readFile(cellsFile, 'utf8'));
+  for (const [lon, lat] of wanted) tiles.push([lon, lat, lon + 1, lat + 1]);
+} else {
+  for (let s = Math.floor(south); s < north; s += TILE_DEGREES) {
+    for (let w = Math.floor(west); w < east; w += TILE_DEGREES) {
+      tiles.push([w, s, Math.min(w + TILE_DEGREES, east), Math.min(s + TILE_DEGREES, north)]);
+    }
   }
 }
 
