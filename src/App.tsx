@@ -97,6 +97,15 @@ export default function App() {
   const [injection, setInjection] = useState<InjectionSettings>(DEFAULT_INJECTION);
   /** Show only storms that actually carry a tornado warning. */
   const [tornadoesOnly, setTornadoesOnly] = useState(false);
+  /**
+   * Which facilities to score and draw.
+   *
+   * "Shelters" is where a tornado response actually starts, so it is offered
+   * first. "Life safety" adds the places that must be protected rather than
+   * sent to. "Everything" is the full critical infrastructure list the
+   * challenge asks for, including substations and towers.
+   */
+  const [facilityScope, setFacilityScope] = useState<'shelters' | 'lifesafety' | 'all'>('all');
   const [now, setNow] = useState(() => Date.now());
 
   /* A slow tick so every relative time on screen stays honest. */
@@ -302,6 +311,16 @@ export default function App() {
 
   const situationRef = useRef<Situation | null>(null);
 
+  /** Facilities narrowed to the scope the operator has chosen. */
+  const scopedFacilities = useMemo(() => {
+    if (facilityScope === 'all') return facilities;
+    const keep =
+      facilityScope === 'shelters'
+        ? new Set<string>(['storm_shelter'])
+        : new Set<string>(['storm_shelter', 'hospital', 'nursing_home', 'school', 'fire_station', 'police']);
+    return facilities.filter((f) => keep.has(f.kind));
+  }, [facilities, facilityScope]);
+
   const situation: Situation | null = useMemo(
     () =>
       buildSituation({
@@ -321,9 +340,9 @@ export default function App() {
                 cached: false,
               }
             : weather,
-        facilities,
+        facilities: scopedFacilities,
       }),
-    [point, visibleAlerts, weather, facilities, mode, injection],
+    [point, visibleAlerts, weather, scopedFacilities, mode, injection],
   );
 
   situationRef.current = situation;
@@ -588,6 +607,22 @@ export default function App() {
               <LayerToggle active={showFacilities} onClick={() => setShowFacilities((v) => !v)}>
                 Infrastructure
               </LayerToggle>
+              {/* What counts as infrastructure. Shelters first, because that
+                  is where a tornado response starts, with the full critical
+                  infrastructure list the brief asks for one tap away. */}
+              {showFacilities
+                ? (
+                    [
+                      ['shelters', 'Shelters'],
+                      ['lifesafety', 'Life safety'],
+                      ['all', 'All'],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <LayerToggle key={id} active={facilityScope === id} onClick={() => setFacilityScope(id)}>
+                      {label}
+                    </LayerToggle>
+                  ))
+                : null}
               <LayerToggle active={false} onClick={focusOnAlerts}>
                 Fit to alerts
               </LayerToggle>
