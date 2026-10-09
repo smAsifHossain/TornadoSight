@@ -9,6 +9,8 @@ import { fetchActiveAlerts, type Alert } from './lib/nws';
 import { fetchWeather, type WeatherSnapshot } from './lib/openmeteo';
 import { loadFacilities, type FacilitySource } from './lib/facilities';
 import { alertAnchor, buildSituation, type Situation } from './lib/situation';
+import InjectionPanel from './components/InjectionPanel';
+import { DEFAULT_INJECTION, injectedHistory, type InjectionSettings } from './lib/injection';
 import { boundsOf, type LatLon } from './lib/geo';
 import type { Facility } from './lib/scoring';
 import {
@@ -33,8 +35,8 @@ import {
   type ReplayEvent,
 } from './lib/replay';
 
-export type Mode = 'live' | 'replay';
-type Tab = 'situation' | 'reports' | 'exposure';
+export type Mode = 'live' | 'replay' | 'inject';
+type Tab = 'situation' | 'reports' | 'exposure' | 'inject';
 
 const LIVE_REFRESH_MS = 60_000;
 const DEFAULT_POINT: LatLon = { lat: 34.4048, lon: -103.2052 };
@@ -89,9 +91,10 @@ export default function App() {
   /** Tornado warnings that appeared since the last poll, newest first. */
   const [breaking, setBreaking] = useState<Alert[]>([]);
   const seenTornadoes = useRef<Set<string> | null>(null);
-  const [radarFrame, setRadarFrame] = useState<{ frame: number; total: number } | null>(null);
+  const [radarFrame, setRadarFrame] = useState<{ frame: number; total: number; time: number } | null>(null);
   /** Replay playback rate, in simulated minutes per real second. */
   const [speed, setSpeed] = useState(4);
+  const [injection, setInjection] = useState<InjectionSettings>(DEFAULT_INJECTION);
   /** Show only storms that actually carry a tornado warning. */
   const [tornadoesOnly, setTornadoesOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -202,8 +205,11 @@ export default function App() {
   /** Everything on screen before the tornado filter. */
   const sourceAlerts = useMemo(() => {
     if (mode === 'replay') return replay && replayAt ? alertsAt(replay, replayAt) : [];
+    // Injected products are built in the same shape as real ones, so they run
+    // through the identical scoring path rather than a parallel test route.
+    if (mode === 'inject') return injectedHistory(injection, point);
     return alerts;
-  }, [mode, replay, replayAt, alerts]);
+  }, [mode, replay, replayAt, alerts, injection, point]);
 
   const tornadoCount = useMemo(
     () => sourceAlerts.filter((a) => a.event === 'Tornado Warning' || a.event === 'Tornado Watch').length,
@@ -297,8 +303,27 @@ export default function App() {
   const situationRef = useRef<Situation | null>(null);
 
   const situation: Situation | null = useMemo(
-    () => buildSituation({ point, alerts: visibleAlerts, weather, facilities }),
-    [point, visibleAlerts, weather, facilities],
+    () =>
+      buildSituation({
+        point,
+        alerts: visibleAlerts,
+        // In injection mode the atmosphere comes from the sliders, so the
+        // weather term can be driven across its whole range on a calm day.
+        weather:
+          mode === 'inject'
+            ? {
+                ...injection.weather,
+                observedAt: new Date(),
+                temperatureF: null,
+                humidityPct: null,
+                windDirectionDeg: null,
+                convectiveInhibition: null,
+                cached: false,
+              }
+            : weather,
+        facilities,
+      }),
+    [point, visibleAlerts, weather, facilities, mode, injection],
   );
 
   situationRef.current = situation;
@@ -313,6 +338,7 @@ export default function App() {
         lon: draft.point.lon,
         photo: draft.photo,
         photoName: draft.photoName,
+        placeName: draft.placeName,
         note: draft.note,
         reporter: draft.reporter,
         imageConfidence: draft.screening?.probability ?? null,
@@ -380,6 +406,8 @@ export default function App() {
     { id: 'reports', label: 'Reports', badge: reports.filter((r) => r.status !== 'dismissed').length },
     { id: 'exposure', label: 'Exposure', badge: situation?.exposure.facilities.length },
   ];
+  // The injection controls only exist in the mode they belong to.
+  if (mode === 'inject') tabs.push({ id: 'inject', label: 'Inject' });
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-hidden">
@@ -416,7 +444,32 @@ export default function App() {
         catalog={catalog}
         onPickEvent={openEvent}
         tornadoesOnly={tornadoesOnly}
-        onTornadoesOnly={setTornadoesOnly}
+        onTornadoesOnly={(v) => {
+          setTornadoesOnly(v);
+          if (!v) return;
+          const tor = sourceAlerts.filter(
+            (a) => (a.event === 'Tornado Warning' || a.event === 'Tornado Watch') && a.geometry,
+          );
+          if (!tor.length) return;
+          let w = 180;
+          let so = 90;
+          let e = -180;
+          let n = -90;
+          for (const a of tor) {
+            const b = boundsOf(a.geometry!.coordinates, a.geometry!.type);
+            if (!b) continue;
+            w = Math.min(w, b.west);
+            so = Math.min(so, b.south);
+            e = Math.max(e, b.east);
+            n = Math.max(n, b.north);
+          }
+          if (w > e) return;
+          setFitBounds([w - 0.2, so - 0.2, e + 0.2, n + 0.2]);
+          // Put the selection on the most urgent one so the panel fills in too.
+          const first = tor.find((a) => a.event === 'Tornado Warning') ?? tor[0];
+          const at = first.motion?.position ?? alertAnchor(first);
+          if (at) setPoint(at);
+        }}
         tornadoCount={tornadoCount}
         speed={speed}
         onSpeed={setSpeed}
@@ -456,7 +509,7 @@ export default function App() {
               setPoint(p);
             }}
             onSelectFacility={setHighlighted}
-            onRadarFrame={(frame, total) => setRadarFrame({ frame, total })}
+            onRadarFrame={(frame, total, time) => setRadarFrame({ frame, total, time })}
           />
 
           {/* A tornado warning that appeared since the last poll. The only
@@ -522,9 +575,12 @@ export default function App() {
                       looking at, so the frame labels itself. */}
                   {showRadar && radarFrame ? (
                     <span className="ml-1 tabular-nums opacity-80">
-                      {radarFrame.frame === radarFrame.total - 1
-                        ? 'now'
-                        : `-${(radarFrame.total - 1 - radarFrame.frame) * 5}m`}
+                      {/* Real frame timestamps from the radar index, rather
+                          than assuming a fixed five minutes a step. */}
+                      {(() => {
+                        const mins = Math.round((Date.now() / 1000 - radarFrame.time) / 60);
+                        return mins <= 1 ? 'now' : `-${mins}m`;
+                      })()}
                     </span>
                   ) : null}
                 </LayerToggle>
@@ -617,6 +673,8 @@ export default function App() {
                 onStatus={handleStatus}
                 onExport={() => void handleExport()}
               />
+            ) : tab === 'inject' ? (
+              <InjectionPanel settings={injection} onChange={setInjection} />
             ) : (
               <ExposurePanel
                 situation={situation}
@@ -631,10 +689,7 @@ export default function App() {
 
       <ReportDialog
         open={dialogOpen}
-        point={point}
-        alerts={visibleAlerts}
-        weather={weather}
-        facilities={facilities}
+        mapPoint={point}
         onClose={() => setDialogOpen(false)}
         onSubmit={(draft) => void handleSubmitReport(draft)}
       />

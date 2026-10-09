@@ -32,6 +32,8 @@ export interface StoredReport {
   photo: Blob | null;
   photoName: string | null;
   note: string;
+  /** The place as the reporter named it, not just coordinates. */
+  placeName: string;
   reporter: string;
   imageConfidence: number | null;
   imageUncertain: boolean;

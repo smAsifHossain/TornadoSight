@@ -200,7 +200,7 @@ export default function Header(props: HeaderProps) {
           className="flex rounded-lg p-0.5"
           style={{ background: 'var(--surface-raised)' }}
         >
-          {(['live', 'replay'] as const).map((m) => (
+          {(['live', 'replay', 'inject'] as const).map((m) => (
             <button
               key={m}
               type="button"
@@ -263,6 +263,24 @@ export default function Header(props: HeaderProps) {
           </button>
         </div>
       </div>
+
+      {mode === 'inject' ? (
+        <div
+          className="flex flex-wrap items-center gap-2 border-t px-3 py-2 sm:px-4"
+          style={{ borderColor: 'color-mix(in srgb, var(--band-medium) 45%, transparent)' }}
+        >
+          <span
+            className="rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wider uppercase"
+            style={{ background: 'var(--band-medium)', color: '#1a1206' }}
+          >
+            Injected test data
+          </span>
+          <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+            Nothing on screen is an observation. The warning and the atmosphere come from the
+            controls in the Inject tab; the shelters and infrastructure around the pin are real.
+          </p>
+        </div>
+      ) : null}
 
       {replaying ? (
         <div

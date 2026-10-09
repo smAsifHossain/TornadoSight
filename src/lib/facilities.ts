@@ -72,12 +72,13 @@ const LIVE_QUERY = (s: number, w: number, n: number, e: number) => {
     `nwr["amenity"~"^(hospital|nursing_home|school|college|university|fire_station|police)$"]${a};` +
     `nwr["power"="substation"]${a};` +
     `nwr["man_made"="communications_tower"]${a};` +
-    `nwr["emergency"="shelter"]${a};` +
+    `nwr["emergency"="storm_shelter"]${a};nwr["shelter_type"="storm_shelter"]${a};` +
     `);out center tags;`
   );
 };
 
 function classify(tags: Record<string, string> = {}): FacilityKind {
+  if (tags.emergency === 'storm_shelter' || tags.shelter_type === 'storm_shelter') return 'storm_shelter';
   if (tags.amenity === 'hospital') return 'hospital';
   if (tags.amenity === 'nursing_home') return 'nursing_home';
   if (['school', 'college', 'university', 'kindergarten'].includes(tags.amenity)) return 'school';
@@ -90,6 +91,7 @@ function classify(tags: Record<string, string> = {}): FacilityKind {
 }
 
 const KIND_LABEL: Record<FacilityKind, string> = {
+  storm_shelter: 'Storm shelter',
   hospital: 'Hospital',
   nursing_home: 'Nursing home',
   school: 'School',

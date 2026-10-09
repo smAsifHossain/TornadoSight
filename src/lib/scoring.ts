@@ -233,6 +233,7 @@ export function warningScore(alerts: Alert[]): ComponentScore {
  * ------------------------------------------------------------------ */
 
 export type FacilityKind =
+  | 'storm_shelter'
   | 'hospital'
   | 'nursing_home'
   | 'school'
@@ -254,6 +255,10 @@ export interface Facility {
 
 /** Weights carried over unchanged from the accepted concept. */
 export const FACILITY_WEIGHT: Record<FacilityKind, number> = {
+  // A designated storm shelter is the most useful thing on this map during a
+  // tornado: it is where people are told to go. It outranks even a hospital,
+  // which is a place to protect rather than a place to send people to.
+  storm_shelter: 3.5,
   hospital: 3.0,
   nursing_home: 3.0,
   school: 2.0,

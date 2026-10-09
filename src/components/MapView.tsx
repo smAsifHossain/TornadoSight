@@ -51,20 +51,43 @@ const BASEMAP_ATTRIBUTION =
   'Basemap: Esri, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 /**
- * Iowa Environmental Mesonet NEXRAD base reflectivity, free and key-less.
+ * Radar comes from RainViewer rather than the raw NEXRAD mosaic.
  *
- * They publish the same mosaic at five minute offsets into the past, which is
- * what makes a loop possible. A still radar frame tells you where the rain is;
- * a loop tells you where it is going, and that is the question a responder is
- * actually asking. Oldest first, so the animation runs forward in time.
+ * The mosaic tiles are 256 pixels and unsmoothed, so at any useful zoom a storm
+ * cell dissolves into visible squares and a responder is reading pixels instead
+ * of weather. RainViewer serves the same data at 512 pixels with smoothing and
+ * a published index of recent frames, which gives both a sharper picture and a
+ * loop whose timestamps are real rather than assumed. Free, and no key.
+ *
+ * The URL shape is /v2/radar/<frame>/<size>/{z}/{x}/{y}/<colour>/<smooth>_<snow>.png
+ * Colour 4 is the familiar NWS reflectivity ramp; 1_1 turns on smoothing and
+ * snow shading.
  */
-const RADAR_FRAMES = ['m25m', 'm20m', 'm15m', 'm10m', 'm05m', ''] as const;
-const radarTiles = (offset: string) =>
-  `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913${offset ? `-${offset}` : ''}/{z}/{x}/{y}.png`;
+const RAINVIEWER_INDEX = 'https://api.rainviewer.com/public/weather-maps.json';
+const RADAR_TILE_SIZE = 512;
+const RADAR_COLOUR = 4;
 
 /** How long each radar frame holds, with a pause on the newest one. */
 const RADAR_FRAME_MS = 420;
-const RADAR_HOLD_MS = 900;
+const RADAR_HOLD_MS = 1100;
+/** How many recent frames to animate. RainViewer publishes around a dozen. */
+const RADAR_FRAME_COUNT = 8;
+
+interface RadarFrame {
+  path: string;
+  time: number;
+}
+
+async function loadRadarFrames(): Promise<RadarFrame[]> {
+  const res = await fetch(RAINVIEWER_INDEX);
+  if (!res.ok) throw new Error('radar index unavailable');
+  const data = (await res.json()) as { host: string; radar?: { past?: { path: string; time: number }[] } };
+  const past = data.radar?.past ?? [];
+  return past.slice(-RADAR_FRAME_COUNT).map((f) => ({ path: `${data.host}${f.path}`, time: f.time }));
+}
+
+const radarTiles = (frame: RadarFrame) =>
+  `${frame.path}/${RADAR_TILE_SIZE}/{z}/{x}/{y}/${RADAR_COLOUR}/1_1.png`;
 
 function baseStyle(theme: 'dark' | 'light'): maplibregl.StyleSpecification {
   const cfg = BASEMAP[theme];
@@ -99,6 +122,7 @@ const ALERT_COLOR: Record<string, string> = {
 const ALERT_FALLBACK = '#78909c';
 
 const FACILITY_COLOR: Record<string, string> = {
+  storm_shelter: '#22d3ee',
   hospital: '#ff5252',
   nursing_home: '#ff7ab2',
   school: '#ffca28',
@@ -113,6 +137,7 @@ const FACILITY_COLOR: Record<string, string> = {
 
 /** Which facilities deserve to be drawn larger, matching the exposure weights. */
 const FACILITY_RANK: Record<string, number> = {
+  storm_shelter: 4,
   hospital: 3,
   nursing_home: 3,
   school: 2,
@@ -143,7 +168,7 @@ export interface MapViewProps {
   onSelectPoint: (p: LatLon) => void;
   onSelectFacility: (id: string) => void;
   /** Fires as the radar loop advances, so the caption can say how old a frame is. */
-  onRadarFrame?: (frame: number, total: number) => void;
+  onRadarFrame?: (frame: number, total: number, timeSeconds: number) => void;
 }
 
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -413,12 +438,14 @@ export default function MapView(props: MapViewProps) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
-      RADAR_FRAMES.forEach((offset, i) => {
+      // Empty radar sources now; the real frame URLs arrive from the index and
+      // are set once it resolves, so the map does not block on that request.
+      for (let i = 0; i < RADAR_FRAME_COUNT; i++) {
         map.addSource(`radar${i}`, {
           type: 'raster',
-          tiles: [radarTiles(offset)],
-          tileSize: 256,
-          attribution: i === 0 ? 'Radar: Iowa Environmental Mesonet' : undefined,
+          tiles: [],
+          tileSize: RADAR_TILE_SIZE,
+          attribution: i === 0 ? 'Radar: <a href="https://www.rainviewer.com">RainViewer</a>' : undefined,
         });
         map.addLayer({
           id: `radar-layer-${i}`,
@@ -427,7 +454,7 @@ export default function MapView(props: MapViewProps) {
           paint: { 'raster-opacity': 0, 'raster-fade-duration': 0 },
           layout: { visibility: 'none' },
         });
-      });
+      }
 
       /* ---- warning polygons ---- */
       map.addLayer({
@@ -843,10 +870,12 @@ export default function MapView(props: MapViewProps) {
     if (!map) return;
 
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    let frames: RadarFrame[] = [];
     let frame = 0;
 
     const clearAll = () => {
-      for (let i = 0; i < RADAR_FRAMES.length; i++) {
+      for (let i = 0; i < RADAR_FRAME_COUNT; i++) {
         const id = `radar-layer-${i}`;
         if (!map.getLayer(id)) continue;
         map.setLayoutProperty(id, 'visibility', 'none');
@@ -855,37 +884,55 @@ export default function MapView(props: MapViewProps) {
     };
 
     const step = () => {
-      if (!map.getLayer('radar-layer-0')) return;
-      for (let i = 0; i < RADAR_FRAMES.length; i++) {
+      if (cancelled || !frames.length || !map.getLayer('radar-layer-0')) return;
+      for (let i = 0; i < frames.length; i++) {
         const id = `radar-layer-${i}`;
         if (!map.getLayer(id)) continue;
-        map.setPaintProperty(id, 'raster-opacity', i === frame ? 0.55 : 0);
+        map.setPaintProperty(id, 'raster-opacity', i === frame ? 0.62 : 0);
       }
-      onRadarFrameRef.current?.(frame, RADAR_FRAMES.length);
+      onRadarFrameRef.current?.(frame, frames.length, frames[frame].time);
       // Hold a beat on the newest frame, the way every radar loop does, so the
       // eye can register where the storm ended up before it jumps back.
-      const isNewest = frame === RADAR_FRAMES.length - 1;
-      frame = (frame + 1) % RADAR_FRAMES.length;
+      const isNewest = frame === frames.length - 1;
+      frame = (frame + 1) % frames.length;
       timer = setTimeout(step, isNewest ? RADAR_HOLD_MS : RADAR_FRAME_MS);
     };
 
-    const start = () => {
+    const start = async () => {
       if (!showRadar) {
         clearAll();
         return;
       }
-      for (let i = 0; i < RADAR_FRAMES.length; i++) {
+      try {
+        frames = await loadRadarFrames();
+      } catch {
+        // No radar is survivable; the warnings and the storm track are not.
+        console.warn('[TornadoSight] radar frames unavailable');
+        return;
+      }
+      if (cancelled || !frames.length) return;
+
+      frames.forEach((f, i) => {
+        const src = map.getSource(`radar${i}`) as { setTiles?: (t: string[]) => void } | undefined;
+        src?.setTiles?.([radarTiles(f)]);
         const id = `radar-layer-${i}`;
         if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
+      });
+      // Any surplus layers stay hidden if the index returned fewer frames.
+      for (let i = frames.length; i < RADAR_FRAME_COUNT; i++) {
+        const id = `radar-layer-${i}`;
+        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
       }
+
       frame = 0;
       step();
     };
 
-    if (readyRef.current) start();
-    else map.once('tornadosight.ready', start);
+    if (readyRef.current) void start();
+    else map.once('tornadosight.ready', () => void start());
 
     return () => {
+      cancelled = true;
       if (timer) clearTimeout(timer);
     };
   }, [showRadar]);

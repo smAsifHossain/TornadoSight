@@ -40,6 +40,13 @@ const UA = 'TornadoSight/0.1 (IEEE Response Quest; emergency response research p
  * tested before the generic social facility catch all.
  */
 const RULES = [
+  // OpenStreetMap tags a tornado shelter as emergency=storm_shelter or
+  // shelter_type=storm_shelter. amenity=shelter is something else entirely: it
+  // is picnic shelters, bus shelters and hiking huts, which is why an earlier
+  // bake found fifty six thousand of them and none were any use in a tornado.
+  { kind: 'storm_shelter', query: 'nwr["emergency"="storm_shelter"]' },
+  { kind: 'storm_shelter', query: 'nwr["shelter_type"="storm_shelter"]' },
+  { kind: 'storm_shelter', query: 'nwr["building"="storm_shelter"]' },
   { kind: 'hospital', query: 'nwr["amenity"="hospital"]' },
   { kind: 'nursing_home', query: 'nwr["amenity"="nursing_home"]' },
   { kind: 'nursing_home', query: 'nwr["social_facility"="nursing_home"]' },
@@ -103,6 +110,12 @@ async function overpass(body) {
 
 
 function classify(tags = {}) {
+  if (
+    tags.emergency === 'storm_shelter' ||
+    tags.shelter_type === 'storm_shelter' ||
+    tags.building === 'storm_shelter'
+  )
+    return 'storm_shelter';
   if (tags.amenity === 'hospital') return 'hospital';
   if (tags.amenity === 'nursing_home' || tags.social_facility === 'nursing_home') return 'nursing_home';
   if (['school', 'college', 'university', 'kindergarten'].includes(tags.amenity)) return 'school';
@@ -117,6 +130,7 @@ function classify(tags = {}) {
 }
 
 const NAMES = {
+  storm_shelter: 'Storm shelter',
   hospital: 'Hospital',
   nursing_home: 'Nursing home',
   school: 'School',
