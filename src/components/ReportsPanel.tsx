@@ -23,13 +23,16 @@ function ReportRow({
   now,
   onFocus,
   onStatus,
+  onDelete,
 }: {
   report: StoredReport;
   now: number;
   onFocus: (r: StoredReport) => void;
   onStatus: (id: string, status: ReportStatus) => void;
+  onDelete: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [thumb, setThumb] = useState<string | null>(null);
 
@@ -75,6 +78,12 @@ function ReportRow({
             ) : null}
           </div>
 
+          {report.placeName ? (
+            <p className="mt-1 text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
+              {report.placeName}
+            </p>
+          ) : null}
+
           {report.note ? (
             <p className="mt-1.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
               {report.note}
@@ -99,6 +108,37 @@ function ReportRow({
             >
               {open ? 'Hide detail' : 'Why this rank'}
             </button>
+            {/* Deleting a report destroys its audit trail with it, so this
+                asks once rather than acting on a single stray tap. */}
+            {confirming ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onDelete(report.id)}
+                  className="rounded px-2 py-1 text-[11px] font-semibold"
+                  style={{ background: 'var(--band-high)', color: '#fff' }}
+                >
+                  Delete for good
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirming(false)}
+                  className="rounded px-2 py-1 text-[11px]"
+                  style={{ background: 'var(--surface-panel)', color: 'var(--text-secondary)' }}
+                >
+                  Keep
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                className="rounded px-2 py-1 text-[11px]"
+                style={{ background: 'var(--surface-panel)', color: 'var(--band-high)' }}
+              >
+                Delete
+              </button>
+            )}
           </div>
         </div>
 
@@ -174,12 +214,14 @@ export default function ReportsPanel({
   now,
   onFocus,
   onStatus,
+  onDelete,
   onExport,
 }: {
   reports: StoredReport[];
   now: number;
   onFocus: (r: StoredReport) => void;
   onStatus: (id: string, status: ReportStatus) => void;
+  onDelete: (id: string) => void;
   onExport: () => void;
 }) {
   const sorted = [...reports].sort((a, b) => {
@@ -207,7 +249,7 @@ export default function ReportsPanel({
       {sorted.length ? (
         <ul className="space-y-2">
           {sorted.map((r) => (
-            <ReportRow key={r.id} report={r} now={now} onFocus={onFocus} onStatus={onStatus} />
+            <ReportRow key={r.id} report={r} now={now} onFocus={onFocus} onStatus={onStatus} onDelete={onDelete} />
           ))}
         </ul>
       ) : (

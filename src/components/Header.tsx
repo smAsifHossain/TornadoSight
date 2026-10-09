@@ -135,6 +135,8 @@ export interface HeaderProps {
   onTornadoesOnly: (v: boolean) => void;
   /** Tornado products available before the filter, for the toggle's label. */
   tornadoCount: number;
+  /** Back to the front door. */
+  onExit?: () => void;
   /** Replay rate, in simulated minutes per real second. */
   speed: number;
   onSpeed: (s: number) => void;
@@ -180,6 +182,7 @@ export default function Header(props: HeaderProps) {
     >
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4">
         <h1 className="flex items-center gap-2 text-sm font-bold tracking-tight">
+          {/* The mark doubles as the way home. */}
           <span
             aria-hidden
             className="grid size-6 place-items-center rounded"

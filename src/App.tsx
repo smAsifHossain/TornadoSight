@@ -62,7 +62,7 @@ function useTheme() {
   return [theme, setTheme] as const;
 }
 
-export default function App() {
+export default function App({ onExit }: { onExit?: () => void }) {
   const [theme, setTheme] = useTheme();
   const [mode, setMode] = useState<Mode>('live');
   const [tab, setTab] = useState<Tab>('situation');
@@ -397,6 +397,14 @@ export default function App() {
     [refreshReports],
   );
 
+  const handleDelete = useCallback(
+    async (id: string) => {
+      await deleteReport(id);
+      refreshReports();
+    },
+    [refreshReports],
+  );
+
   const handleExport = useCallback(async () => {
     const json = await exportJson();
     const blob = new Blob([json], { type: 'application/json' });
@@ -499,6 +507,7 @@ export default function App() {
           if (at) setPoint(at);
         }}
         tornadoCount={tornadoCount}
+        onExit={onExit}
         speed={speed}
         onSpeed={setSpeed}
       />
@@ -715,6 +724,7 @@ export default function App() {
                   setFitBounds([r.lon - 0.15, r.lat - 0.12, r.lon + 0.15, r.lat + 0.12]);
                 }}
                 onStatus={handleStatus}
+                onDelete={(id) => void handleDelete(id)}
                 onExport={() => void handleExport()}
               />
             ) : tab === 'inject' ? (
