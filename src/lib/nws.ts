@@ -55,6 +55,8 @@ export interface Alert {
   maxWindGustMph: number | null;
   hailThreat: ThreatLevel;
   maxHailInches: number | null;
+  /** Zone URLs a watch is issued against, used to give it a shape. */
+  affectedZones: string[];
   /** VTEC string, which identifies one event across its updates. */
   vtec: string | null;
   /**
@@ -174,14 +176,40 @@ export function normalizeAlert(feature: any): Alert | null {
     maxWindGustMph: parseMeasure(firstParam(params, 'maxWindGust')),
     hailThreat: asThreat(firstParam(params, 'hailThreat')),
     maxHailInches: parseMeasure(firstParam(params, 'maxHailSize')),
+    affectedZones: Array.isArray(p.affectedZones) ? (p.affectedZones as string[]) : [],
     vtec: firstParam(params, 'VTEC'),
     stormKey: parseStormKey(firstParam(params, 'VTEC')),
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
+/**
+ * When the National Weather Service refuses, stop asking for a while.
+ *
+ * Polling a 403 once a minute is what keeps a temporary block in place. This
+ * holds off for five minutes and reports plainly, rather than quietly
+ * retrying into the same wall.
+ */
+let backoffUntil = 0;
+
+export function nwsBackoffRemainingMs(): number {
+  return Math.max(0, backoffUntil - Date.now());
+}
+
 async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
+  const waiting = nwsBackoffRemainingMs();
+  if (waiting > 0) {
+    throw new Error(
+      `the National Weather Service is rate limiting this client. Retrying in about ${Math.ceil(waiting / 60000)} minutes.`,
+    );
+  }
   const res = await fetch(url, { headers: NWS_HEADERS, signal });
+  if (res.status === 403 || res.status === 429) {
+    backoffUntil = Date.now() + 5 * 60_000;
+    throw new Error(
+      'the National Weather Service is rate limiting this client. Backing off for five minutes.',
+    );
+  }
   if (!res.ok) throw new Error(`NWS request failed with ${res.status} for ${url}`);
   return res.json();
 }
@@ -220,4 +248,133 @@ export async function fetchArchivedAlerts(
   if (options.area) q.set('area', options.area);
   const data = (await fetchJson(`${NWS_API}/alerts?${q}`, signal)) as { features?: unknown[] };
   return (data.features ?? []).map(normalizeAlert).filter((a): a is Alert => a !== null);
+}
+
+/* ------------------------------------------------------------------ *
+ * Zone geometry for products that carry none
+ * ------------------------------------------------------------------ */
+
+/**
+ * Give a watch a shape.
+ *
+ * Only warnings come with a polygon. A watch is issued against a list of
+ * counties and marine zones, so its `geometry` is null and it draws as nothing
+ * at all: every tornado watch in the country was invisible on the map, and
+ * "tornadoes only" had nothing to frame because the only tornado products
+ * active were watches.
+ *
+ * The zone list on the alert is already a set of URLs. The bulk endpoint
+ * returns those zones with null geometry even when asked for it, so each is
+ * fetched individually and cached, which is affordable because watches are few
+ * and their zones repeat heavily between products.
+ */
+/** Rings of one zone's polygon, or null if it has no usable shape. */
+const zoneCache = new Map<string, number[][][] | null>();
+
+async function fetchZone(url: string, signal?: AbortSignal): Promise<number[][][] | null> {
+  const cached = zoneCache.get(url);
+  if (cached !== undefined) return cached;
+  if (zonesBlocked) return null;
+  try {
+    const res = await fetch(url, { headers: NWS_HEADERS, signal });
+    if (res.status === 403 || res.status === 429) {
+      zonesBlocked = true;
+      console.warn('[TornadoSight] zone lookups refused, stopping them for this session');
+      return null;
+    }
+    if (!res.ok) throw new Error(String(res.status));
+    const data = (await res.json()) as {
+      geometry?: { type: string; coordinates: unknown } | null;
+    };
+    const g = data.geometry;
+    let rings: number[][][] | null = null;
+    if (g?.type === 'Polygon') {
+      rings = g.coordinates as number[][][];
+    } else if (g?.type === 'MultiPolygon') {
+      // Flatten a multipart county into one ring list; holes are rare here and
+      // an outline is all this is used for.
+      rings = (g.coordinates as number[][][][]).flat();
+    }
+    zoneCache.set(url, rings);
+    return rings;
+  } catch {
+    zoneCache.set(url, null);
+    return null;
+  }
+}
+
+/** How many zones to resolve for one alert. A statewide watch can list dozens. */
+const MAX_ZONES_PER_ALERT = 25;
+
+/**
+ * Zone lookups in flight at once, across every alert.
+ *
+ * Resolving four watches without a limit fired well over a hundred requests in
+ * one breath and the alerts feed itself started failing, which is a far worse
+ * outcome than a watch drawing slowly. The shapes are a nicety; the feed is not.
+ */
+const ZONE_CONCURRENCY = 1;
+
+/** Total zone lookups allowed per refresh, across every alert. */
+const MAX_ZONES_PER_REFRESH = 12;
+/** Gap between zone lookups. */
+const ZONE_GAP_MS = 300;
+
+/**
+ * A session wide stop.
+ *
+ * A burst of zone lookups earned a 403 from the National Weather Service and
+ * took the entire alerts feed down with it, which is a catastrophic trade for
+ * drawing a watch outline. One refusal and this stops asking for the rest of
+ * the session: the feed matters, the outlines do not.
+ */
+let zonesBlocked = false;
+
+async function inBatches(tasks: (() => Promise<void>)[], limit: number): Promise<void> {
+  for (let i = 0; i < tasks.length && !zonesBlocked; i += limit) {
+    await Promise.all(tasks.slice(i, i + limit).map((t) => t()));
+    await new Promise((r) => setTimeout(r, ZONE_GAP_MS));
+  }
+}
+
+/**
+ * Fill in geometry for any alert that lacks it, from the zones it was issued
+ * against. Alerts that already carry a polygon are returned untouched.
+ */
+export async function resolveZoneGeometry(alerts: Alert[], signal?: AbortSignal): Promise<Alert[]> {
+  if (zonesBlocked) return alerts;
+  // Tornado products only, and the most recent first. Outlining every flood
+  // watch in the country is not worth a single request.
+  const needing = alerts
+    .filter((a) => !a.geometry && a.affectedZones.length && /Tornado/.test(a.event))
+    .sort((a, b) => b.sent.getTime() - a.sent.getTime());
+  if (!needing.length) return alerts;
+
+  // One polygon per zone, so the result is a genuine MultiPolygon rather than
+  // every county's rings tipped into a single bag.
+  const collected = new Map<string, number[][][][]>();
+  const jobs: (() => Promise<void>)[] = [];
+
+  for (const alert of needing) {
+    if (jobs.length >= MAX_ZONES_PER_REFRESH) break;
+    const polygons: number[][][][] = [];
+    collected.set(alert.id, polygons);
+    const room = MAX_ZONES_PER_REFRESH - jobs.length;
+    for (const url of alert.affectedZones.slice(0, Math.min(MAX_ZONES_PER_ALERT, room))) {
+      jobs.push(async () => {
+        const rings = await fetchZone(url, signal);
+        if (rings?.length) polygons.push(rings);
+      });
+    }
+  }
+
+  await inBatches(jobs, ZONE_CONCURRENCY);
+
+  const patched = new Map<string, Alert['geometry']>();
+  for (const [id, polygons] of collected) {
+    if (polygons.length) patched.set(id, { type: 'MultiPolygon', coordinates: polygons });
+  }
+  if (!patched.size) return alerts;
+
+  return alerts.map((a) => (patched.has(a.id) ? { ...a, geometry: patched.get(a.id)! } : a));
 }

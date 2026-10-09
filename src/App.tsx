@@ -5,7 +5,7 @@ import ReportsPanel from './components/ReportsPanel';
 import ReportDialog, { type ReportDraft } from './components/ReportDialog';
 import ExposurePanel from './components/ExposurePanel';
 import Header from './components/Header';
-import { fetchActiveAlerts, type Alert } from './lib/nws';
+import { fetchActiveAlerts, resolveZoneGeometry, type Alert } from './lib/nws';
 import { fetchWeather, type WeatherSnapshot } from './lib/openmeteo';
 import { loadFacilities, type FacilitySource } from './lib/facilities';
 import { alertAnchor, buildSituation, type Situation } from './lib/situation';
@@ -144,6 +144,15 @@ export default function App() {
       setAlerts(next);
       setLastUpdated(new Date());
       setError(null);
+
+      // Watches arrive without a polygon and would draw as nothing at all.
+      // Fill their shape in from the zones they were issued against, after the
+      // first paint so the warnings are never held up waiting for it.
+      void resolveZoneGeometry(next)
+        .then((withShapes) => {
+          if (withShapes !== next) setAlerts(withShapes);
+        })
+        .catch(() => undefined);
     } catch (err) {
       setError(
         err instanceof Error
