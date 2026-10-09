@@ -66,6 +66,16 @@ const BASEMAP_ATTRIBUTION =
 const RAINVIEWER_INDEX = 'https://api.rainviewer.com/public/weather-maps.json';
 const RADAR_TILE_SIZE = 512;
 const RADAR_COLOUR = 4;
+/**
+ * Deepest zoom RainViewer actually has radar for. Past this it answers with a
+ * placeholder tile stamped "zoom not supported", so the source is capped here
+ * and MapLibre scales the last real tile instead of asking for one that does
+ * not exist.
+ */
+const RADAR_MAX_ZOOM = 10;
+/** Above this the upscaled radar is mush, so it fades out rather than lying. */
+const RADAR_FADE_START = 10;
+const RADAR_FADE_END = 12;
 
 /** How long each radar frame holds, with a pause on the newest one. */
 const RADAR_FRAME_MS = 420;
@@ -445,6 +455,7 @@ export default function MapView(props: MapViewProps) {
           type: 'raster',
           tiles: [],
           tileSize: RADAR_TILE_SIZE,
+          maxzoom: RADAR_MAX_ZOOM,
           attribution: i === 0 ? 'Radar: <a href="https://www.rainviewer.com">RainViewer</a>' : undefined,
         });
         map.addLayer({
@@ -888,7 +899,21 @@ export default function MapView(props: MapViewProps) {
       for (let i = 0; i < frames.length; i++) {
         const id = `radar-layer-${i}`;
         if (!map.getLayer(id)) continue;
-        map.setPaintProperty(id, 'raster-opacity', i === frame ? 0.62 : 0);
+        map.setPaintProperty(
+          id,
+          'raster-opacity',
+          i === frame
+            ? ([
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                RADAR_FADE_START,
+                0.62,
+                RADAR_FADE_END,
+                0,
+              ] as unknown as number)
+            : 0,
+        );
       }
       onRadarFrameRef.current?.(frame, frames.length, frames[frame].time);
       // Hold a beat on the newest frame, the way every radar loop does, so the

@@ -286,6 +286,15 @@ export interface ExposureResult extends ComponentScore {
   weightedPoints: number;
   /** Facilities sorted by urgency, nearest projected impact first. */
   facilities: ExposedFacility[];
+  /** Designated storm shelters within range, nearest first. */
+  shelters: ExposedFacility[];
+  /** 0 when people here have somewhere to go, 1 when they have nowhere. */
+  scarcity: number;
+  /**
+   * False when no shelter is recorded anywhere in range. Absence of data is
+   * not absence of shelter, and the two must not be scored the same way.
+   */
+  sheltersKnown: boolean;
 }
 
 export interface ExposedFacility extends Facility {
@@ -372,7 +381,11 @@ export function facilityExposure(
       }
     }
 
-    weightedPoints += contribution;
+    // A storm shelter is not a thing at risk, it is somewhere to send people.
+    // Counting it as exposure would mean a neighbourhood scored *higher* for
+    // having somewhere to shelter, which is backwards. Shelters are carried in
+    // the list and on the map, but they are scored only through scarcity.
+    if (f.kind !== 'storm_shelter') weightedPoints += contribution;
     scored.push({ ...f, distanceMiles: miles, corridorMiles, minutesToImpact, contribution });
   }
 
@@ -384,27 +397,83 @@ export function facilityExposure(
     return a.distanceMiles - b.distanceMiles;
   });
 
-  const score = exposureFromPoints(weightedPoints);
+  const exposure = exposureFromPoints(weightedPoints);
   const inPath = scored.filter((f) => f.minutesToImpact !== null);
+  const shelters = scored
+    .filter((f) => f.kind === 'storm_shelter')
+    .sort((a, b) => a.distanceMiles - b.distanceMiles);
+
+  /**
+   * Whether shelter data exists here at all.
+   *
+   * OpenStreetMap has essentially no tornado shelters mapped in the United
+   * States: a sweep of the whole tornado belt returned zero. If scarcity were
+   * applied anyway it would read 1 everywhere, inflating every score by the
+   * same amount and discriminating nothing, while implying a confident finding
+   * that nobody has anywhere to go. So when no shelter is known in range the
+   * term is held at zero and the interface says the data is missing.
+   */
+  const sheltersKnown = shelters.length > 0;
+  const scarcity = sheltersKnown ? shelterScarcity(shelters, radiusMiles) : 0;
+
+  /**
+   * Exposure measures what is at risk here. Scarcity measures the opposite
+   * thing: whether the people here have anywhere to go. Two places under the
+   * same tornado with the same hospitals at risk are not in the same trouble
+   * if one of them has no shelter within reach, so the absence counts toward
+   * needing help rather than being invisible.
+   *
+   * Scarcity is given a quarter of the weight. It is a real factor, but a
+   * well sheltered downtown full of hospitals still outranks an empty field
+   * with no shelter in it, and it must not invert that.
+   */
+  const score = clamp01(exposure * 0.75 + scarcity * exposure * 0.25 + scarcity * 0.12 * Math.sign(weightedPoints));
 
   const terms: ScoreTerm[] = [
     {
       label: 'Facilities within range',
-      value: score,
-      weight: 1,
+      value: exposure,
+      weight: 0.75,
       detail: `${scored.length} facilities, ${weightedPoints.toFixed(1)} weighted points`,
+    },
+    {
+      label: 'Shelter scarcity',
+      value: scarcity,
+      weight: sheltersKnown ? 0.25 : 0,
+      detail: sheltersKnown
+        ? `${shelters.length} storm ${shelters.length === 1 ? 'shelter' : 'shelters'}, nearest ${shelters[0].distanceMiles.toFixed(1)} mi`
+        : 'no shelter data for this area, so this is not being scored',
     },
   ];
   if (inPath.length) {
     terms.push({
       label: 'In the projected storm path',
-      value: score,
+      value: exposure,
       weight: 0,
       detail: `${inPath.length} facilities, soonest in ${Math.round(inPath[0].minutesToImpact!)} min`,
     });
   }
 
-  return { score, terms, missing: [], weightedPoints, facilities: scored };
+  return { score, terms, missing: [], weightedPoints, facilities: scored, shelters, scarcity, sheltersKnown };
+}
+
+/**
+ * How badly a place needs help *because of what it lacks*.
+ *
+ * A neighbourhood with four designated storm shelters inside a mile can be
+ * told where to go. One with none cannot, and that is a reason to send help,
+ * not a neutral fact. The curve is steep near zero on purpose: the difference
+ * between no shelter and one shelter matters far more than between six and
+ * seven, and a shelter two miles away is worth more than one nine miles away
+ * when the warning has twenty minutes left on it.
+ */
+export function shelterScarcity(shelters: ExposedFacility[], radiusMiles = 10): number {
+  if (!shelters.length) return 1;
+  const reach = shelters.reduce(
+    (sum, s) => sum + Math.max(0, 1 - s.distanceMiles / radiusMiles) ** 2,
+    0,
+  );
+  return clamp01(Math.exp(-reach * 1.6));
 }
 
 /* ------------------------------------------------------------------ *

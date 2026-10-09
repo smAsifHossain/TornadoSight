@@ -7,6 +7,7 @@ import {
   responderPriority,
   warningScore,
   weatherSeverity,
+  shelterScarcity,
   type Facility,
 } from './scoring';
 import { normalizeAlert, parseStormMotion } from './nws';
@@ -488,5 +489,75 @@ describe('trend narrative', () => {
       const t = assessTrend(pair);
       if (t.state !== 'steady') expect(t.detail).not.toContain('without a change in threat');
     }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Shelter scarcity
+ * ------------------------------------------------------------------ */
+
+describe('shelter scarcity', () => {
+  const shelterAt = (id: string, miles: number) => facilityAt(id, 'storm_shelter', 90, miles);
+
+  it('treats nowhere to shelter as total scarcity, as a pure measure', () => {
+    expect(shelterScarcity([])).toBe(1);
+  });
+
+  // Absence of data is not absence of shelter. OpenStreetMap has essentially no
+  // tornado shelters mapped in the United States, so scoring "no shelter found"
+  // as "nobody has anywhere to go" would inflate every score equally while
+  // implying a confident finding nobody made.
+  it('does not score scarcity when no shelter data exists here', () => {
+    const r = facilityExposure(ORIGIN, [facilityAt('h', 'hospital', 90, 2)]);
+    expect(r.sheltersKnown).toBe(false);
+    expect(r.scarcity).toBe(0);
+    expect(r.terms.find((t) => t.label === 'Shelter scarcity')?.weight).toBe(0);
+  });
+
+  it('falls as shelters come within reach', () => {
+    const far = facilityExposure(ORIGIN, [facilityAt('h', 'hospital', 90, 2), shelterAt('s1', 9)]).scarcity;
+    const near = facilityExposure(ORIGIN, [facilityAt('h', 'hospital', 90, 2), shelterAt('s1', 1)]).scarcity;
+    const several = facilityExposure(ORIGIN, [
+      facilityAt('h', 'hospital', 90, 2),
+      shelterAt('s1', 1),
+      shelterAt('s2', 2),
+      shelterAt('s3', 3),
+    ]).scarcity;
+    expect(far).toBeGreaterThan(near);
+    expect(near).toBeGreaterThan(several);
+  });
+
+  // The point of the measure: where shelter data does exist, having only a
+  // distant one is itself a reason to send help.
+  it('scores a place whose only shelter is far above one with shelters close by', () => {
+    const risk = [facilityAt('h', 'hospital', 90, 2), facilityAt('sc', 'school', 45, 2)];
+    const sparse = facilityExposure(ORIGIN, [...risk, shelterAt('s1', 9)]).score;
+    const wellServed = facilityExposure(ORIGIN, [...risk, shelterAt('s1', 1), shelterAt('s2', 2)]).score;
+    expect(sparse).toBeGreaterThan(wellServed);
+  });
+
+  // A shelter is somewhere to send people, not an asset at risk. Counting it as
+  // exposure made a neighbourhood score higher for having one.
+  it('does not count a shelter as something at risk', () => {
+    const bare = facilityExposure(ORIGIN, [facilityAt('h', 'hospital', 90, 2)]);
+    const withShelter = facilityExposure(ORIGIN, [facilityAt('h', 'hospital', 90, 2), shelterAt('s1', 2)]);
+    expect(withShelter.weightedPoints).toBeCloseTo(bare.weightedPoints, 6);
+    expect(withShelter.facilities.length).toBe(2);
+  });
+
+  it('still ranks a dense downtown above an empty field', () => {
+    const downtown = facilityExposure(ORIGIN, [
+      facilityAt('h1', 'hospital', 90, 1),
+      facilityAt('h2', 'hospital', 80, 2),
+      facilityAt('n1', 'nursing_home', 70, 1),
+      facilityAt('s1', 'school', 60, 1),
+      facilityAt('p1', 'power_substation', 50, 2),
+      shelterAt('sh1', 1),
+    ]).score;
+    expect(downtown).toBeGreaterThan(facilityExposure(ORIGIN, []).score);
+  });
+
+  it('scores an empty area at zero', () => {
+    expect(facilityExposure(ORIGIN, []).score).toBe(0);
   });
 });
