@@ -137,6 +137,8 @@ export interface HeaderProps {
   tornadoCount: number;
   /** Back to the front door. */
   onExit?: () => void;
+  /** Jump straight to the injection controls. */
+  onOpenInject?: () => void;
   /** Replay rate, in simulated minutes per real second. */
   speed: number;
   onSpeed: (s: number) => void;
@@ -165,6 +167,8 @@ export default function Header(props: HeaderProps) {
     onTornadoesOnly,
     tornadoCount,
     speed,
+    onExit,
+    onOpenInject,
     onSpeed,
   } = props;
 
@@ -183,15 +187,18 @@ export default function Header(props: HeaderProps) {
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4">
         <h1 className="flex items-center gap-2 text-sm font-bold tracking-tight">
           {/* The mark doubles as the way home. */}
-          <span
-            aria-hidden
+          {/* The mark doubles as the way back to the front door. */}
+          <button
+            type="button"
+            onClick={onExit}
+            aria-label="Back to the start page"
             className="grid size-6 place-items-center rounded"
             style={{ background: 'var(--band-high)', color: '#fff' }}
           >
-            <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2.2">
+            <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
               <path d="M3 5h18M5 10h14M8 15h8M11 20h3" strokeLinecap="round" />
             </svg>
-          </span>
+          </button>
           {/* The wordmark costs a third of a phone's header width, so on the
               narrowest screens the mark alone carries it. */}
           <span className="hidden min-[400px]:inline">TornadoSight</span>
@@ -279,9 +286,20 @@ export default function Header(props: HeaderProps) {
             Injected test data
           </span>
           <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-            Nothing on screen is an observation. The warning and the atmosphere come from the
-            controls in the Inject tab; the shelters and infrastructure around the pin are real.
+            Nothing on screen is an observation. The warning and the whole atmosphere, including
+            every weather value, come from the controls; the shelters and infrastructure around
+            the pin are real.
           </p>
+          {/* The panel tab is easy to miss on a narrow screen, and a banner
+              that names the controls should be able to open them. */}
+          <button
+            type="button"
+            onClick={onOpenInject}
+            className="rounded px-2.5 py-1 text-[11px] font-semibold"
+            style={{ background: 'var(--band-medium)', color: '#1a1206' }}
+          >
+            Open the controls
+          </button>
         </div>
       ) : null}
 

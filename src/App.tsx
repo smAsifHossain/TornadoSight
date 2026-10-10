@@ -555,6 +555,10 @@ export default function App({ onExit }: { onExit?: () => void }) {
         }}
         tornadoCount={tornadoCount}
         onExit={onExit}
+        onOpenInject={() => {
+          setTab('inject');
+          setSheetOpen(true);
+        }}
         speed={speed}
         onSpeed={setSpeed}
       />
