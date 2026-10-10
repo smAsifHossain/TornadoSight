@@ -42,7 +42,18 @@ export async function reverseGeocode(point: LatLon, signal?: AbortSignal): Promi
         longitude: point.lon.toFixed(4),
         localityLanguage: 'en',
       });
-      const res = await fetch(`${ENDPOINT}?${q}`, { signal });
+      /**
+       * Deliberately not passed the caller's abort signal.
+       *
+       * This promise is shared with everyone asking about the same point, and
+       * it is created by whoever asked first. Binding it to that first
+       * caller's signal meant React aborting its own initial effect pass also
+       * poisoned the answer for the second pass, which had a perfectly live
+       * signal, and no name ever appeared. The request is one small lookup
+       * whose result is cached, so letting it finish costs less than getting
+       * it wrong. Callers that have moved on discard the result below.
+       */
+      const res = await fetch(`${ENDPOINT}?${q}`);
       if (!res.ok) throw new Error(String(res.status));
       const data = (await res.json()) as {
         city?: string;
@@ -63,16 +74,10 @@ export async function reverseGeocode(point: LatLon, signal?: AbortSignal): Promi
       const label = parts.length ? [...new Set(parts)].join(', ') : null;
       cache.set(key, label);
       return label;
-    } catch (err) {
-      /**
-       * An abort is not an answer, so it must not be cached as one.
-       *
-       * React runs effects twice in development: the first call is aborted by
-       * its own cleanup, and caching that as "no name here" meant the second
-       * call got the failure back instantly and no label ever appeared.
-       */
-      const aborted = signal?.aborted || (err instanceof DOMException && err.name === 'AbortError');
-      if (!aborted) cache.set(key, null);
+    } catch {
+      // A genuine failure is worth remembering for this session so a dead
+      // endpoint is not asked about the same point on every render.
+      cache.set(key, null);
       return null;
     } finally {
       inflight.delete(key);
@@ -80,5 +85,9 @@ export async function reverseGeocode(point: LatLon, signal?: AbortSignal): Promi
   })();
 
   inflight.set(key, task);
-  return task;
+
+  const label = await task;
+  // The lookup still filled the cache, which is what the next caller wants,
+  // but a caller that has since moved to another point gets nothing to apply.
+  return signal?.aborted ? null : label;
 }

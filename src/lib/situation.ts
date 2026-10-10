@@ -37,16 +37,28 @@ export interface Situation {
   trend: TrendResult;
 }
 
-/** Alerts whose polygon actually contains the point. */
+/**
+ * Alerts in force at the point.
+ *
+ * `coversPoint` is trusted ahead of the geometry test. Alerts fetched for one
+ * location come back already filtered by the service, and most of them are
+ * issued against zones and carry no polygon, so insisting on a shape threw
+ * every one of them away. A reporter standing inside a tornado watch was
+ * scored as though nothing at all was in effect, and filed as Low.
+ */
 export function alertsCovering(point: LatLon, alerts: Alert[]): Alert[] {
   return alerts.filter(
-    (a) => a.geometry && pointInPolygon(point, a.geometry.coordinates, a.geometry.type),
+    (a) =>
+      a.coversPoint ||
+      (a.geometry && pointInPolygon(point, a.geometry.coordinates, a.geometry.type)),
   );
 }
 
 /** Alerts whose polygon falls within `miles` of the point. */
 export function alertsNear(point: LatLon, alerts: Alert[], miles: number): Alert[] {
   return alerts.filter((a) => {
+    // Already known to be in force here, which is as near as it gets.
+    if (a.coversPoint) return true;
     if (!a.geometry) return false;
     if (pointInPolygon(point, a.geometry.coordinates, a.geometry.type)) return true;
     const b = boundsOf(a.geometry.coordinates, a.geometry.type);

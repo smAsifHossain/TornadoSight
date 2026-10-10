@@ -94,6 +94,8 @@ export default function App({ onExit }: { onExit?: () => void }) {
   /** Tornado warnings that appeared since the last poll, newest first. */
   const [breaking, setBreaking] = useState<Alert[]>([]);
   const seenTornadoes = useRef<Set<string> | null>(null);
+  /** Guards against an older zone resolution pass overwriting a newer refresh. */
+  const zonePass = useRef(0);
   /** A human readable name for the selected point, resolved in the background. */
   const [placeLabel, setPlaceLabel] = useState<string | null>(null);
   /** The report currently being examined on the map. */
@@ -152,12 +154,23 @@ export default function App({ onExit }: { onExit?: () => void }) {
       setLastUpdated(new Date());
       setError(null);
 
-      // Watches arrive without a polygon and would draw as nothing at all.
-      // Fill their shape in from the zones they were issued against, after the
-      // first paint so the warnings are never held up waiting for it.
-      void resolveZoneGeometry(next)
+      /**
+       * Three quarters of the feed arrives with no polygon and would draw as
+       * nothing at all. Fill those shapes in from the zones each product was
+       * issued against, after the first paint so the drawn warnings are never
+       * held up waiting for it.
+       *
+       * The callback matters: on a cold cache this takes a minute or two to
+       * cover the country, and showing each batch as it lands means the map
+       * visibly fills out instead of looking half empty until the end. A newer
+       * refresh may land first, so a stale pass must not overwrite it.
+       */
+      const stamp = ++zonePass.current;
+      void resolveZoneGeometry(next, undefined, (partial) => {
+        if (zonePass.current === stamp) setAlerts(partial);
+      })
         .then((withShapes) => {
-          if (withShapes !== next) setAlerts(withShapes);
+          if (zonePass.current === stamp && withShapes !== next) setAlerts(withShapes);
         })
         .catch(() => undefined);
     } catch (err) {
@@ -236,9 +249,60 @@ export default function App({ onExit }: { onExit?: () => void }) {
     return alerts;
   }, [mode, replay, replayAt, alerts, injection, point]);
 
-  const tornadoCount = useMemo(
-    () => sourceAlerts.filter((a) => a.event === 'Tornado Warning' || a.event === 'Tornado Watch').length,
+  const tornadoProducts = useMemo(
+    () => sourceAlerts.filter((a) => a.event === 'Tornado Warning' || a.event === 'Tornado Watch'),
     [sourceAlerts],
+  );
+
+  const tornadoCount = tornadoProducts.length;
+
+  /**
+   * The jump list behind the tornado filter, worst first.
+   *
+   * Only products with a shape can be flown to, since without one there is no
+   * place to put the camera. Warnings come before watches, and a tornado
+   * somebody has actually seen comes before one radar merely suspects.
+   */
+  const tornadoTargets = useMemo(
+    () =>
+      tornadoProducts
+        .filter((a) => a.geometry || a.motion)
+        .sort((a, b) => {
+          const kind = Number(b.event === 'Tornado Warning') - Number(a.event === 'Tornado Warning');
+          if (kind !== 0) return kind;
+          const seen = Number(b.tornadoDetection === 'OBSERVED') - Number(a.tornadoDetection === 'OBSERVED');
+          if (seen !== 0) return seen;
+          return b.sent.getTime() - a.sent.getTime();
+        })
+        .map((a) => ({
+          id: a.id,
+          event: a.event,
+          // areaDesc is the county list the issuing office wrote. It can run
+          // long on a watch, so it is trimmed rather than wrapped to four lines.
+          area: a.areaDesc.length > 64 ? `${a.areaDesc.slice(0, 61)}...` : a.areaDesc,
+          detection: a.tornadoDetection,
+          warning: a.event === 'Tornado Warning',
+        })),
+    [tornadoProducts],
+  );
+
+  /** Fly to one tornado product and select it, so the panels fill in with it. */
+  const jumpToTornado = useCallback(
+    (id: string) => {
+      const found = tornadoProducts.find((a) => a.id === id);
+      if (!found) return;
+      setTornadoesOnly(true);
+      const at = found.motion?.position ?? alertAnchor(found);
+      if (at) setPoint(at);
+      const b = found.geometry ? boundsOf(found.geometry.coordinates, found.geometry.type) : null;
+      if (b) {
+        setFitBounds([b.west - 0.25, b.south - 0.2, b.east + 0.25, b.north + 0.2]);
+      } else if (at) {
+        setFitBounds([at.lon - 0.5, at.lat - 0.4, at.lon + 0.5, at.lat + 0.4]);
+      }
+      setHighlighted(null);
+    },
+    [tornadoProducts],
   );
 
   const visibleAlerts = useMemo(() => {
@@ -473,6 +537,16 @@ export default function App({ onExit }: { onExit?: () => void }) {
     for (const a of withGeometry) {
       const b = boundsOf(a.geometry!.coordinates, a.geometry!.type);
       if (!b) continue;
+      /**
+       * Ignore anything outside the states.
+       *
+       * The National Weather Service also issues for Guam, American Samoa and
+       * the far Pacific, and a single small craft advisory out there dragged
+       * this to a view of the whole globe with the United States a thumbnail
+       * in the corner. Those products are real and stay on the map; they just
+       * do not get a vote on where the camera goes.
+       */
+      if (b.east < -180 || b.west > -60 || b.north < 15 || b.south > 73) continue;
       west = Math.min(west, b.west);
       south = Math.min(south, b.south);
       east = Math.max(east, b.east);
@@ -554,6 +628,8 @@ export default function App({ onExit }: { onExit?: () => void }) {
           if (at) setPoint(at);
         }}
         tornadoCount={tornadoCount}
+        tornadoTargets={tornadoTargets}
+        onJumpToTornado={jumpToTornado}
         onExit={onExit}
         onOpenInject={() => {
           setTab('inject');

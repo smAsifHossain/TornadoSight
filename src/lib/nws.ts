@@ -7,6 +7,7 @@
  */
 
 import { KNOTS_TO_MPH, type LatLon } from './geo';
+import { readZoneGeometry, writeZoneGeometry } from './storage';
 
 export const NWS_API = 'https://api.weather.gov';
 
@@ -57,6 +58,17 @@ export interface Alert {
   maxHailInches: number | null;
   /** Zone URLs a watch is issued against, used to give it a shape. */
   affectedZones: string[];
+  /**
+   * True when this alert is known to cover the point it was fetched for,
+   * because the service was asked about that point rather than the country.
+   *
+   * Most products are issued against a list of zones and carry no polygon at
+   * all, so a plain "is the point inside the shape" test throws them away. A
+   * point query has already answered that question on the server, and this
+   * records the answer so the scoring does not have to ask again and get it
+   * wrong.
+   */
+  coversPoint: boolean;
   /** VTEC string, which identifies one event across its updates. */
   vtec: string | null;
   /**
@@ -177,6 +189,7 @@ export function normalizeAlert(feature: any): Alert | null {
     hailThreat: asThreat(firstParam(params, 'hailThreat')),
     maxHailInches: parseMeasure(firstParam(params, 'maxHailSize')),
     affectedZones: Array.isArray(p.affectedZones) ? (p.affectedZones as string[]) : [],
+    coversPoint: false,
     vtec: firstParam(params, 'VTEC'),
     stormKey: parseStormKey(firstParam(params, 'VTEC')),
   };
@@ -229,7 +242,12 @@ export async function fetchActiveAlerts(signal?: AbortSignal): Promise<Alert[]> 
 export async function fetchAlertsAtPoint(point: LatLon, signal?: AbortSignal): Promise<Alert[]> {
   const url = `${NWS_API}/alerts/active?status=actual&point=${point.lat.toFixed(4)},${point.lon.toFixed(4)}`;
   const data = (await fetchJson(url, signal)) as { features?: unknown[] };
-  return (data.features ?? []).map(normalizeAlert).filter((a): a is Alert => a !== null);
+  return (data.features ?? [])
+    .map(normalizeAlert)
+    .filter((a): a is Alert => a !== null)
+    // Everything the service returns here covers the point by definition, and
+    // most of it arrives with no polygon to prove it.
+    .map((a) => ({ ...a, coversPoint: true }));
 }
 
 /**
@@ -271,54 +289,107 @@ export async function fetchArchivedAlerts(
 /** Rings of one zone's polygon, or null if it has no usable shape. */
 const zoneCache = new Map<string, number[][][] | null>();
 
-async function fetchZone(url: string, signal?: AbortSignal): Promise<number[][][] | null> {
-  const cached = zoneCache.get(url);
-  if (cached !== undefined) return cached;
-  if (zonesBlocked) return null;
-  try {
-    const res = await fetch(url, { headers: NWS_HEADERS, signal });
-    if (res.status === 403 || res.status === 429) {
-      zonesBlocked = true;
-      console.warn('[TornadoSight] zone lookups refused, stopping them for this session');
-      return null;
-    }
-    if (!res.ok) throw new Error(String(res.status));
-    const data = (await res.json()) as {
-      geometry?: { type: string; coordinates: unknown } | null;
-    };
-    const g = data.geometry;
-    let rings: number[][][] | null = null;
-    if (g?.type === 'Polygon') {
-      rings = g.coordinates as number[][][];
-    } else if (g?.type === 'MultiPolygon') {
-      // Flatten a multipart county into one ring list; holes are rare here and
-      // an outline is all this is used for.
-      rings = (g.coordinates as number[][][][]).flat();
-    }
-    zoneCache.set(url, rings);
-    return rings;
-  } catch {
-    zoneCache.set(url, null);
-    return null;
+/** Zone lookups already in flight, so two alerts sharing a county fetch once. */
+const zoneInflight = new Map<string, Promise<number[][][] | null>>();
+
+async function fetchZone(url: string): Promise<number[][][] | null> {
+  const memory = zoneCache.get(url);
+  if (memory !== undefined) return memory;
+
+  const flying = zoneInflight.get(url);
+  if (flying) return flying;
+
+  /**
+   * Disk before network.
+   *
+   * A county boundary does not move, so a zone fetched in any previous session
+   * is still correct now. Reading it back costs nothing and spends none of the
+   * request budget, which is what makes covering the whole country affordable
+   * rather than a slow bleed of lookups every time the app opens.
+   */
+  const stored = await readZoneGeometry(url);
+  if (stored !== undefined) {
+    zoneCache.set(url, stored);
+    return stored;
   }
+
+  if (zonesBlocked) return null;
+
+  const task = (async (): Promise<number[][][] | null> => {
+    try {
+      /**
+       * Deliberately not passed the caller's abort signal.
+       *
+       * Two alerts over the same county share this one promise, and it belongs
+       * to whichever asked first. Binding it to that caller's signal lets one
+       * refresh being cancelled hand a false "no shape here" to every other
+       * alert waiting on the same county. Stopping work is handled where it
+       * belongs, in the batch loop below, which simply stops starting more.
+       */
+      const res = await fetch(url, { headers: NWS_HEADERS });
+      if (res.status === 403 || res.status === 429) {
+        zonesBlocked = true;
+        console.warn('[TornadoSight] zone lookups refused, stopping them for this session');
+        return null;
+      }
+      if (!res.ok) throw new Error(String(res.status));
+      const data = (await res.json()) as {
+        geometry?: { type: string; coordinates: unknown } | null;
+      };
+      const g = data.geometry;
+      let rings: number[][][] | null = null;
+      if (g?.type === 'Polygon') {
+        rings = g.coordinates as number[][][];
+      } else if (g?.type === 'MultiPolygon') {
+        // Flatten a multipart county into one ring list; holes are rare here and
+        // an outline is all this is used for.
+        rings = (g.coordinates as number[][][][]).flat();
+      }
+      zoneCache.set(url, rings);
+      void writeZoneGeometry(url, rings);
+      return rings;
+    } catch {
+      /**
+       * Remembered as a miss for this session only, never written to disk. A
+       * zone that failed once because of a hiccup should be tried again on the
+       * next run rather than being permanently recorded as shapeless.
+       */
+      zoneCache.set(url, null);
+      return null;
+    } finally {
+      zoneInflight.delete(url);
+    }
+  })();
+
+  zoneInflight.set(url, task);
+  return task;
 }
 
 /** How many zones to resolve for one alert. A statewide watch can list dozens. */
-const MAX_ZONES_PER_ALERT = 25;
+const MAX_ZONES_PER_ALERT = 40;
 
 /**
  * Zone lookups in flight at once, across every alert.
  *
  * Resolving four watches without a limit fired well over a hundred requests in
  * one breath and the alerts feed itself started failing, which is a far worse
- * outcome than a watch drawing slowly. The shapes are a nicety; the feed is not.
+ * outcome than a watch drawing slowly. Four at a time is well inside what the
+ * service tolerates, and because every result is kept on disk the number of
+ * lookups falls towards zero as the cache fills.
  */
-const ZONE_CONCURRENCY = 1;
+const ZONE_CONCURRENCY = 4;
 
-/** Total zone lookups allowed per refresh, across every alert. */
-const MAX_ZONES_PER_REFRESH = 12;
-/** Gap between zone lookups. */
-const ZONE_GAP_MS = 300;
+/**
+ * Network lookups allowed per refresh, counting only zones not already known.
+ *
+ * On a first run this fills the map over a couple of minutes, roughly a state
+ * at a time, newest and most dangerous first. By the third or fourth run
+ * almost every zone is on disk and the budget goes unused.
+ */
+const MAX_ZONES_PER_REFRESH = 220;
+
+/** Gap between batches of lookups. */
+const ZONE_GAP_MS = 120;
 
 /**
  * A session wide stop.
@@ -330,24 +401,46 @@ const ZONE_GAP_MS = 300;
  */
 let zonesBlocked = false;
 
-async function inBatches(tasks: (() => Promise<void>)[], limit: number): Promise<void> {
-  for (let i = 0; i < tasks.length && !zonesBlocked; i += limit) {
-    await Promise.all(tasks.slice(i, i + limit).map((t) => t()));
-    await new Promise((r) => setTimeout(r, ZONE_GAP_MS));
-  }
+/** True once the service has refused a zone lookup in this session. */
+export function zoneLookupsBlocked(): boolean {
+  return zonesBlocked;
+}
+
+/**
+ * Order alerts by how much their absence from the map costs a responder.
+ *
+ * Tornado products first because they are the reason this app exists, then the
+ * rest of the severe convective family, then everything else newest first. A
+ * small craft advisory is worth drawing but it waits its turn.
+ */
+function drawPriority(a: Alert): number {
+  if (/Tornado/i.test(a.event)) return 0;
+  if (/Severe Thunderstorm|Flash Flood|Extreme Wind|Dust Storm/i.test(a.event)) return 1;
+  if (a.severity === 'Extreme' || a.severity === 'Severe') return 2;
+  return 3;
 }
 
 /**
  * Fill in geometry for any alert that lacks it, from the zones it was issued
  * against. Alerts that already carry a polygon are returned untouched.
+ *
+ * Three quarters of the live feed arrives with no polygon, because anything
+ * issued against a zone list rather than a drawn box has none. Left alone the
+ * map shows only the drawn warnings, which cluster wherever the convection is,
+ * so the country looks empty everywhere else and the picture is wrong.
+ *
+ * `onProgress` is called each time a batch lands with the alerts patched so
+ * far, so the map fills in while this is still working instead of staying bare
+ * until the last zone arrives.
  */
-export async function resolveZoneGeometry(alerts: Alert[], signal?: AbortSignal): Promise<Alert[]> {
-  if (zonesBlocked) return alerts;
-  // Tornado products only, and the most recent first. Outlining every flood
-  // watch in the country is not worth a single request.
+export async function resolveZoneGeometry(
+  alerts: Alert[],
+  signal?: AbortSignal,
+  onProgress?: (alerts: Alert[]) => void,
+): Promise<Alert[]> {
   const needing = alerts
-    .filter((a) => !a.geometry && a.affectedZones.length && /Tornado/.test(a.event))
-    .sort((a, b) => b.sent.getTime() - a.sent.getTime());
+    .filter((a) => !a.geometry && a.affectedZones.length)
+    .sort((a, b) => drawPriority(a) - drawPriority(b) || b.sent.getTime() - a.sent.getTime());
   if (!needing.length) return alerts;
 
   // One polygon per zone, so the result is a genuine MultiPolygon rather than
@@ -355,26 +448,48 @@ export async function resolveZoneGeometry(alerts: Alert[], signal?: AbortSignal)
   const collected = new Map<string, number[][][][]>();
   const jobs: (() => Promise<void>)[] = [];
 
+  /**
+   * Zones already on disk cost nothing, so they are not counted against the
+   * budget. Only genuinely unknown zones are rationed, which is why a warm
+   * cache draws the whole country at once and a cold one fills in by degrees.
+   */
+  let unknownBudget = MAX_ZONES_PER_REFRESH;
+
   for (const alert of needing) {
-    if (jobs.length >= MAX_ZONES_PER_REFRESH) break;
     const polygons: number[][][][] = [];
     collected.set(alert.id, polygons);
-    const room = MAX_ZONES_PER_REFRESH - jobs.length;
-    for (const url of alert.affectedZones.slice(0, Math.min(MAX_ZONES_PER_ALERT, room))) {
+
+    for (const url of alert.affectedZones.slice(0, MAX_ZONES_PER_ALERT)) {
+      const known = zoneCache.has(url);
+      if (!known) {
+        if (unknownBudget <= 0) continue;
+        unknownBudget -= 1;
+      }
       jobs.push(async () => {
-        const rings = await fetchZone(url, signal);
+        const rings = await fetchZone(url);
         if (rings?.length) polygons.push(rings);
       });
     }
   }
 
-  await inBatches(jobs, ZONE_CONCURRENCY);
+  const patch = (): Alert[] => {
+    const patched = new Map<string, Alert['geometry']>();
+    for (const [id, polygons] of collected) {
+      if (polygons.length) patched.set(id, { type: 'MultiPolygon', coordinates: polygons });
+    }
+    return patched.size
+      ? alerts.map((a) => (patched.has(a.id) ? { ...a, geometry: patched.get(a.id)! } : a))
+      : alerts;
+  };
 
-  const patched = new Map<string, Alert['geometry']>();
-  for (const [id, polygons] of collected) {
-    if (polygons.length) patched.set(id, { type: 'MultiPolygon', coordinates: polygons });
+  for (let i = 0; i < jobs.length && !zonesBlocked; i += ZONE_CONCURRENCY) {
+    if (signal?.aborted) break;
+    await Promise.all(jobs.slice(i, i + ZONE_CONCURRENCY).map((t) => t()));
+    // Show what has landed every so often rather than once at the end, so the
+    // map visibly fills in instead of sitting bare for a minute.
+    if (onProgress && i > 0 && i % (ZONE_CONCURRENCY * 8) === 0) onProgress(patch());
+    await new Promise((r) => setTimeout(r, ZONE_GAP_MS));
   }
-  if (!patched.size) return alerts;
 
-  return alerts.map((a) => (patched.has(a.id) ? { ...a, geometry: patched.get(a.id)! } : a));
+  return patch();
 }

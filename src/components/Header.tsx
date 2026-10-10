@@ -13,6 +13,86 @@ import type { Mode } from '../App';
  * invite, so replay mode restyles the strip rather than showing a quiet label.
  */
 
+/** One tornado product the operator can jump straight to. */
+export interface TornadoTarget {
+  id: string;
+  /** "Tornado Warning" or "Tornado Watch". */
+  event: string;
+  /** The counties it covers, as the issuing office wrote them. */
+  area: string;
+  /** Whether radar indicated it or somebody saw it on the ground. */
+  detection: string | null;
+  /** True for a warning, which outranks any watch in the list. */
+  warning: boolean;
+}
+
+/**
+ * The jump list behind "Tornadoes only".
+ *
+ * Filtering the map down to tornadoes answers "what else is out there" but not
+ * "take me to it", and during an outbreak the active cells can be two thousand
+ * miles apart with nothing on screen between them. This turns the count on the
+ * button into a menu of real places, worst first, so getting to the fourth
+ * warning in Mississippi is one movement rather than a hunt across the map.
+ *
+ * It opens on hover for speed and on focus for anyone using a keyboard, and
+ * closes on a short delay so crossing the gap between button and list does not
+ * dismiss it.
+ */
+function TornadoJumpList({
+  targets,
+  onJump,
+  open,
+}: {
+  targets: TornadoTarget[];
+  onJump: (id: string) => void;
+  open: boolean;
+}) {
+  if (!open || !targets.length) return null;
+
+  return (
+    <div
+      className="absolute top-full right-0 z-30 mt-1 w-72 overflow-hidden rounded-lg border shadow-xl"
+      style={{ borderColor: 'var(--border-soft)', background: 'var(--surface-panel)' }}
+      role="menu"
+    >
+      <p
+        className="border-b px-3 py-1.5 text-[10px] tracking-wider uppercase"
+        style={{ borderColor: 'var(--border-soft)', color: 'var(--text-muted)' }}
+      >
+        Jump to a tornado
+      </p>
+      <ul className="max-h-72 overflow-y-auto scroll-slim">
+        {targets.map((t) => (
+          <li key={t.id}>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => onJump(t.id)}
+              className="flex w-full items-start gap-2 px-3 py-2 text-left hover:brightness-125"
+              style={{ background: 'transparent' }}
+            >
+              <span
+                className="mt-0.5 size-2 shrink-0 rounded-full"
+                style={{ background: t.warning ? 'var(--band-high)' : 'var(--band-medium)' }}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[11px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+                  {t.area}
+                </span>
+                <span className="block text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                  {t.event}
+                  {t.detection ? `, ${t.detection.toLowerCase()}` : ''}
+                </span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function PlaceSearch({ onPick }: { onPick: (p: Place) => void }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Place[]>([]);
@@ -135,6 +215,9 @@ export interface HeaderProps {
   onTornadoesOnly: (v: boolean) => void;
   /** Tornado products available before the filter, for the toggle's label. */
   tornadoCount: number;
+  /** Every tornado product that can be flown to, worst first. */
+  tornadoTargets: TornadoTarget[];
+  onJumpToTornado: (id: string) => void;
   /** Back to the front door. */
   onExit?: () => void;
   /** Jump straight to the injection controls. */
@@ -166,6 +249,8 @@ export default function Header(props: HeaderProps) {
     tornadoesOnly,
     onTornadoesOnly,
     tornadoCount,
+    tornadoTargets,
+    onJumpToTornado,
     speed,
     onExit,
     onOpenInject,
@@ -173,6 +258,34 @@ export default function Header(props: HeaderProps) {
   } = props;
 
   const replaying = mode === 'replay';
+
+  /**
+   * The jump list stays up for a moment after the pointer leaves.
+   *
+   * The button and the list it opens do not touch, so closing the instant the
+   * pointer leaves the button made the list impossible to reach. A short grace
+   * period means moving down into it keeps it open, while moving away still
+   * dismisses it without a click.
+   */
+  const [jumpsOpen, setJumpsOpen] = useState(false);
+  const jumpTimer = useRef<number | null>(null);
+
+  const openJumps = () => {
+    if (jumpTimer.current !== null) window.clearTimeout(jumpTimer.current);
+    setJumpsOpen(true);
+  };
+
+  const closeJumps = () => {
+    if (jumpTimer.current !== null) window.clearTimeout(jumpTimer.current);
+    jumpTimer.current = window.setTimeout(() => setJumpsOpen(false), 220);
+  };
+
+  useEffect(
+    () => () => {
+      if (jumpTimer.current !== null) window.clearTimeout(jumpTimer.current);
+    },
+    [],
+  );
 
   return (
     <header
@@ -231,21 +344,44 @@ export default function Header(props: HeaderProps) {
 
         <div className="ml-auto flex items-center gap-2">
           {/* During an outbreak the map fills with flood and marine products.
-              This strips it back to the one hazard the tool is for. */}
-          <button
-            type="button"
-            onClick={() => onTornadoesOnly(!tornadoesOnly)}
-            aria-pressed={tornadoesOnly}
-            className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold"
-            style={{
-              background: tornadoesOnly ? 'var(--band-high)' : 'var(--surface-raised)',
-              color: tornadoesOnly ? '#fff' : 'var(--text-secondary)',
-            }}
-            title="Show only tornado warnings and watches"
+              This strips it back to the one hazard the tool is for, and holding
+              the pointer on it offers the list of where they actually are. */}
+          <div
+            className="relative"
+            onMouseEnter={openJumps}
+            onMouseLeave={closeJumps}
+            onFocus={openJumps}
+            onBlur={closeJumps}
           >
-            Tornadoes only
-            <span className="ml-1 tabular-nums opacity-80">{tornadoCount}</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => onTornadoesOnly(!tornadoesOnly)}
+              aria-pressed={tornadoesOnly}
+              aria-expanded={jumpsOpen}
+              className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold"
+              style={{
+                background: tornadoesOnly ? 'var(--band-high)' : 'var(--surface-raised)',
+                color: tornadoesOnly ? '#fff' : 'var(--text-secondary)',
+              }}
+              title={
+                tornadoTargets.length
+                  ? 'Show only tornado warnings and watches. Hold here to jump to one.'
+                  : 'Show only tornado warnings and watches'
+              }
+            >
+              Tornadoes only
+              <span className="ml-1 tabular-nums opacity-80">{tornadoCount}</span>
+            </button>
+
+            <TornadoJumpList
+              targets={tornadoTargets}
+              open={jumpsOpen}
+              onJump={(id) => {
+                setJumpsOpen(false);
+                onJumpToTornado(id);
+              }}
+            />
+          </div>
 
           <span className="hidden text-[11px] tabular-nums sm:inline" style={{ color: 'var(--text-muted)' }}>
             {alertCount} active

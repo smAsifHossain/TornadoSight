@@ -17,7 +17,7 @@
 import type { PriorityBand } from './scoring';
 
 const DB_NAME = 'tornadosight';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const REPORTS = 'reports';
 const AUDIT = 'audit';
 
@@ -73,7 +73,25 @@ const CHANNEL = 'tornadosight.reports';
 const channel: BroadcastChannel | null =
   typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CHANNEL);
 
+/**
+ * Listeners in this tab.
+ *
+ * A BroadcastChannel deliberately does not deliver to the tab that posted, so
+ * relying on it alone meant a change made here was the one change this tab
+ * never heard about. Every caller then had to remember to refresh by hand, and
+ * three of the four mutations did not. Local listeners are notified directly
+ * so one write is one notification wherever it came from.
+ */
+const local = new Set<() => void>();
+
 function announce() {
+  for (const fn of local) {
+    try {
+      fn();
+    } catch {
+      /* one bad listener must not stop the others hearing about this */
+    }
+  }
   try {
     channel?.postMessage('changed');
   } catch {
@@ -83,10 +101,13 @@ function announce() {
 
 /** Run `fn` whenever the report queue changes, in this tab or any other. */
 export function onReportsChanged(fn: () => void): () => void {
-  if (!channel) return () => undefined;
+  local.add(fn);
   const handler = () => fn();
-  channel.addEventListener('message', handler);
-  return () => channel.removeEventListener('message', handler);
+  channel?.addEventListener('message', handler);
+  return () => {
+    local.delete(fn);
+    channel?.removeEventListener('message', handler);
+  };
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -101,6 +122,9 @@ function openDb(): Promise<IDBDatabase> {
         const store = db.createObjectStore(REPORTS, { keyPath: 'id' });
         store.createIndex('createdAt', 'createdAt');
         store.createIndex('band', 'band');
+      }
+      if (!db.objectStoreNames.contains('zones')) {
+        db.createObjectStore('zones', { keyPath: 'url' });
       }
       if (!db.objectStoreNames.contains(AUDIT)) {
         const store = db.createObjectStore(AUDIT, { keyPath: 'id', autoIncrement: true });
@@ -137,6 +161,7 @@ export async function saveReport(report: StoredReport): Promise<void> {
     action: 'filed',
     detail: `Scored ${report.band} at ${(report.priorityScore * 100).toFixed(0)} out of 100`,
   });
+  announce();
 }
 
 export async function listReports(): Promise<StoredReport[]> {
@@ -154,6 +179,7 @@ export async function setReportStatus(id: string, status: ReportStatus, who: str
     action: status,
     detail: who ? `Marked ${status} by ${who}` : `Marked ${status}`,
   });
+  announce();
 }
 
 /** Change how far around a sighting the responder wants assessed. */
@@ -167,6 +193,7 @@ export async function setReportRadius(id: string, radiusMiles: number): Promise<
 export async function deleteReport(id: string): Promise<void> {
   await run(REPORTS, 'readwrite', (s) => s.delete(id));
   await appendAudit({ reportId: id, at: Date.now(), action: 'deleted', detail: 'Report removed by operator' });
+  announce();
 }
 
 export async function appendAudit(entry: AuditEntry): Promise<void> {
@@ -206,4 +233,53 @@ export async function exportJson(): Promise<string> {
 export async function clearAll(): Promise<void> {
   await run(REPORTS, 'readwrite', (s) => s.clear());
   await run(AUDIT, 'readwrite', (s) => s.clear());
+}
+
+/* ------------------------------------------------------------------ *
+ * Zone geometry cache
+ * ------------------------------------------------------------------ */
+
+/**
+ * County and marine zone outlines, kept between sessions.
+ *
+ * Three quarters of the National Weather Service feed arrives with no polygon:
+ * watches, advisories and anything issued against a list of zones rather than
+ * a drawn shape. Without their outlines the map shows only the convective
+ * warnings, which cluster wherever the weather is, and the whole country looks
+ * empty by comparison.
+ *
+ * Zone boundaries are static, so fetching one twice is pure waste. They are
+ * stored here permanently, which turns a recurring cost into a one time one
+ * and keeps the request volume far away from the rate limit that took the feed
+ * down once already.
+ */
+const ZONES = 'zones';
+
+export async function readZoneGeometry(url: string): Promise<number[][][] | null | undefined> {
+  try {
+    const row = await run<{ url: string; rings: number[][][] | null } | undefined>(
+      ZONES,
+      'readonly',
+      (s) => s.get(url),
+    );
+    return row ? row.rings : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeZoneGeometry(url: string, rings: number[][][] | null): Promise<void> {
+  try {
+    await run(ZONES, 'readwrite', (s) => s.put({ url, rings }));
+  } catch {
+    /* a cache miss is survivable; a thrown error here is not worth it */
+  }
+}
+
+export async function countCachedZones(): Promise<number> {
+  try {
+    return await run<number>(ZONES, 'readonly', (s) => s.count());
+  } catch {
+    return 0;
+  }
 }

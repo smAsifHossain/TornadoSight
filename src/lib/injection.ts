@@ -173,6 +173,8 @@ export function injectedAlert(settings: InjectionSettings, at: LatLon, now = new
     hailThreat: settings.maxHailInches ? 'RADAR INDICATED' : null,
     maxHailInches: settings.maxHailInches || null,
     affectedZones: [],
+    // The injected polygon is real geometry, so the usual test applies.
+    coversPoint: false,
     vtec: null,
     // A stable key so successive injected products read as one storm and the
     // trend logic has something coherent to follow.

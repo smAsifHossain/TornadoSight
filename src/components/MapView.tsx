@@ -67,15 +67,22 @@ const RAINVIEWER_INDEX = 'https://api.rainviewer.com/public/weather-maps.json';
 const RADAR_TILE_SIZE = 512;
 const RADAR_COLOUR = 4;
 /**
- * Deepest zoom RainViewer actually has radar for. Past this it answers with a
- * placeholder tile stamped "zoom not supported", so the source is capped here
- * and MapLibre scales the last real tile instead of asking for one that does
- * not exist.
+ * Deepest tile zoom RainViewer actually has radar for.
+ *
+ * Past this it answers 200 with a placeholder image stamped "Zoom Level Not
+ * Supported", which MapLibre has no way to tell from real weather and happily
+ * painted across the map in letters bigger than the storm. Measured rather
+ * than assumed: tiles are 130KB at z7 and an identical 3.3KB at z8, z9 and
+ * z10, which is the placeholder being served over and over. Capping the source
+ * here makes MapLibre scale the last real tile instead of asking for one that
+ * does not exist.
+ *
+ * These are 512 pixel tiles, so a tile zoom of 7 is a map zoom of about 8.
  */
-const RADAR_MAX_ZOOM = 10;
+const RADAR_MAX_ZOOM = 7;
 /** Above this the upscaled radar is mush, so it fades out rather than lying. */
-const RADAR_FADE_START = 10;
-const RADAR_FADE_END = 12;
+const RADAR_FADE_START = 9;
+const RADAR_FADE_END = 11;
 
 /** How long each radar frame holds, with a pause on the newest one. */
 const RADAR_FRAME_MS = 420;
@@ -454,8 +461,24 @@ export default function MapView(props: MapViewProps) {
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: baseStyle(themeRef.current),
-      center: [-97.34, 37.69],
-      zoom: 5,
+      /**
+       * Open on the whole country, not on Tornado Alley.
+       *
+       * Zoom 5 over Kansas framed the plains and cut off both coasts, which
+       * made a national picture look like a regional one and quietly implied
+       * nothing was happening anywhere else. A responder should see every
+       * state that has something active before deciding where to look closer.
+       *
+       * Given as bounds rather than a zoom number so the fit follows the pane:
+       * the map shares the window with a side panel and gets much narrower on
+       * a laptop than on a wall display, and any single zoom that frames the
+       * country on one of those clips Maine and Oregon off the other.
+       */
+      bounds: [
+        [-125.5, 24.0],
+        [-66.5, 49.5],
+      ],
+      fitBoundsOptions: { padding: 24 },
       attributionControl: { compact: true },
       // A gentle curve makes a flyTo read as travel rather than teleportation,
       // which helps when the map jumps to a facility in a list.
@@ -493,24 +516,16 @@ export default function MapView(props: MapViewProps) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
-      // Empty radar sources now; the real frame URLs arrive from the index and
-      // are set once it resolves, so the map does not block on that request.
-      for (let i = 0; i < RADAR_FRAME_COUNT; i++) {
-        map.addSource(`radar${i}`, {
-          type: 'raster',
-          tiles: [],
-          tileSize: RADAR_TILE_SIZE,
-          maxzoom: RADAR_MAX_ZOOM,
-          attribution: i === 0 ? 'Radar: <a href="https://www.rainviewer.com">RainViewer</a>' : undefined,
-        });
-        map.addLayer({
-          id: `radar-layer-${i}`,
-          type: 'raster',
-          source: `radar${i}`,
-          paint: { 'raster-opacity': 0, 'raster-fade-duration': 0 },
-          layout: { visibility: 'none' },
-        });
-      }
+      /**
+       * Radar is built later, in the effect that loads the frame index.
+       *
+       * It used to be created here with `tiles: []` and filled in once the
+       * index resolved, which crashed the whole style: MapLibre takes the
+       * template string the moment it decides to load a tile, and on an empty
+       * array there is nothing to take, so every one of the eight frames threw
+       * and no layer after them was ever added. A raster source is only made
+       * now when there is a real URL to give it.
+       */
 
       /* ---- warning polygons ---- */
       map.addLayer({
@@ -754,13 +769,15 @@ export default function MapView(props: MapViewProps) {
      * made a moment too early throws harmlessly and the next event retries.
      */
     let built = false;
+    let lastBuildError: unknown = null;
     const tryBuild = () => {
       if (built || !map.getStyle()?.layers?.length) return;
       try {
         buildLayers();
         built = true;
-      } catch {
+      } catch (err) {
         /* too early, a later event will retry */
+        lastBuildError = err;
       }
     };
     map.on('styledata', tryBuild);
@@ -768,10 +785,27 @@ export default function MapView(props: MapViewProps) {
     map.on('idle', tryBuild);
     tryBuild();
 
-    fallbackRef.current = setTimeout(() => {
+    /**
+     * Keep trying for a while before declaring failure.
+     *
+     * A single check at five seconds reported the map as broken on a slow or
+     * backgrounded tab that went on to build itself perfectly a moment later,
+     * which is a red console error contradicted by the working map behind it.
+     * This retries quietly and only complains once, after a grace period long
+     * enough that the complaint means something.
+     */
+    let attempts = 0;
+    const retry = () => {
       tryBuild();
-      if (!built) console.error('[TornadoSight] the map layers could not be built');
-    }, 5000);
+      attempts += 1;
+      if (built) return;
+      if (attempts < 6) {
+        fallbackRef.current = setTimeout(retry, 2500);
+        return;
+      }
+      console.error('[TornadoSight] the map layers could not be built', lastBuildError);
+    };
+    fallbackRef.current = setTimeout(retry, 2500);
 
     const observer = new ResizeObserver(() => map.resize());
     observer.observe(containerRef.current);
@@ -998,17 +1032,38 @@ export default function MapView(props: MapViewProps) {
       }
       if (cancelled || !frames.length) return;
 
-      frames.forEach((f, i) => {
-        const src = map.getSource(`radar${i}`) as { setTiles?: (t: string[]) => void } | undefined;
-        src?.setTiles?.([radarTiles(f)]);
-        const id = `radar-layer-${i}`;
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
-      });
-      // Any surplus layers stay hidden if the index returned fewer frames.
-      for (let i = frames.length; i < RADAR_FRAME_COUNT; i++) {
-        const id = `radar-layer-${i}`;
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
+      /**
+       * Build one source and layer per frame, now that each has a real URL.
+       *
+       * Radar has to sit under the warnings and the storm track but over the
+       * basemap, so each layer is inserted before the first warning layer
+       * rather than appended on top. Any previous stack is torn down first,
+       * because refreshing the index gives a new set of frame paths.
+       */
+      const beneath = map.getLayer('alert-fill') ? 'alert-fill' : undefined;
+      for (let i = 0; i < RADAR_FRAME_COUNT; i++) {
+        if (map.getLayer(`radar-layer-${i}`)) map.removeLayer(`radar-layer-${i}`);
+        if (map.getSource(`radar${i}`)) map.removeSource(`radar${i}`);
       }
+
+      frames.forEach((f, i) => {
+        map.addSource(`radar${i}`, {
+          type: 'raster',
+          tiles: [radarTiles(f)],
+          tileSize: RADAR_TILE_SIZE,
+          maxzoom: RADAR_MAX_ZOOM,
+          attribution: i === 0 ? 'Radar: <a href="https://www.rainviewer.com">RainViewer</a>' : undefined,
+        });
+        map.addLayer(
+          {
+            id: `radar-layer-${i}`,
+            type: 'raster',
+            source: `radar${i}`,
+            paint: { 'raster-opacity': 0, 'raster-fade-duration': 0 },
+          },
+          beneath,
+        );
+      });
 
       frame = 0;
       step();

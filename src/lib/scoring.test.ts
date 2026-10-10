@@ -360,7 +360,7 @@ describe('geo', () => {
  * Trend
  * ------------------------------------------------------------------ */
 
-import { assessTrend } from './situation';
+import { alertsCovering, assessTrend } from './situation';
 
 /** A product for one storm, identified by its VTEC tracking number. */
 function product(
@@ -559,5 +559,61 @@ describe('shelter scarcity', () => {
 
   it('scores an empty area at zero', () => {
     expect(facilityExposure(ORIGIN, []).score).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Alerts that cover a point without carrying a polygon
+ * ------------------------------------------------------------------ */
+
+describe('alertsCovering', () => {
+  const point = { lat: 30.496, lon: -82.948 };
+
+  /**
+   * Regression. Three quarters of the live feed is issued against a list of
+   * zones and arrives with no polygon at all. The point query answers "what is
+   * in force here" on the server, but the result was then put through a point
+   * in polygon test that every one of those products failed, so a reporter
+   * standing inside a tornado watch was scored as though the sky were clear
+   * and their sighting was filed as Low.
+   */
+  it('keeps a zone based alert that the service said covers the point', () => {
+    const watch = { ...alertOf('Tornado Watch'), coversPoint: true };
+    expect(watch.geometry).toBeNull();
+    expect(alertsCovering(point, [watch])).toHaveLength(1);
+  });
+
+  it('still discards an alert that neither covers the point nor contains it', () => {
+    const elsewhere = alertOf('Tornado Watch');
+    expect(elsewhere.coversPoint).toBe(false);
+    expect(alertsCovering(point, [elsewhere])).toHaveLength(0);
+  });
+
+  it('honours the polygon test when there is a polygon and no server answer', () => {
+    const inside = {
+      ...alertOf('Tornado Warning'),
+      geometry: {
+        type: 'Polygon' as const,
+        coordinates: [
+          [
+            [-83.2, 30.3],
+            [-82.7, 30.3],
+            [-82.7, 30.7],
+            [-83.2, 30.7],
+            [-83.2, 30.3],
+          ],
+        ],
+      },
+    };
+    const outside = { ...inside, id: 'other', geometry: { ...inside.geometry, coordinates: [
+      [
+        [-90.2, 30.3],
+        [-89.7, 30.3],
+        [-89.7, 30.7],
+        [-90.2, 30.7],
+        [-90.2, 30.3],
+      ],
+    ] } };
+    expect(alertsCovering(point, [inside, outside]).map((a) => a.id)).toEqual([inside.id]);
   });
 });
