@@ -9,6 +9,7 @@ import { fetchActiveAlerts, resolveZoneGeometry, type Alert } from './lib/nws';
 import { fetchWeather, type WeatherSnapshot } from './lib/openmeteo';
 import { loadFacilities, type FacilitySource } from './lib/facilities';
 import { alertAnchor, buildSituation, type Situation } from './lib/situation';
+import { reverseGeocode } from './lib/reverseGeocode';
 import InjectionPanel from './components/InjectionPanel';
 import { DEFAULT_INJECTION, injectedHistory, type InjectionSettings } from './lib/injection';
 import { boundsOf, type LatLon } from './lib/geo';
@@ -19,6 +20,8 @@ import {
   listReports,
   saveReport,
   setReportStatus,
+  setReportRadius,
+  onReportsChanged,
   type ReportStatus,
   type StoredReport,
 } from './lib/storage';
@@ -91,6 +94,10 @@ export default function App({ onExit }: { onExit?: () => void }) {
   /** Tornado warnings that appeared since the last poll, newest first. */
   const [breaking, setBreaking] = useState<Alert[]>([]);
   const seenTornadoes = useRef<Set<string> | null>(null);
+  /** A human readable name for the selected point, resolved in the background. */
+  const [placeLabel, setPlaceLabel] = useState<string | null>(null);
+  /** The report currently being examined on the map. */
+  const [activeReport, setActiveReport] = useState<string | null>(null);
   const [radarFrame, setRadarFrame] = useState<{ frame: number; total: number; time: number } | null>(null);
   /** Replay playback rate, in simulated minutes per real second. */
   const [speed, setSpeed] = useState(4);
@@ -284,6 +291,14 @@ export default function App({ onExit }: { onExit?: () => void }) {
     return () => controller.abort();
   }, [point]);
 
+  /** Resolve the selected point to a name a responder can act on. */
+  useEffect(() => {
+    const controller = new AbortController();
+    setPlaceLabel(null);
+    void reverseGeocode(point, controller.signal).then(setPlaceLabel);
+    return () => controller.abort();
+  }, [point]);
+
   /* ---------------------------------------------------------------- *
    * Reports
    * ---------------------------------------------------------------- */
@@ -292,7 +307,12 @@ export default function App({ onExit }: { onExit?: () => void }) {
     void listReports().then(setReports).catch(() => undefined);
   }, []);
 
-  useEffect(() => refreshReports(), [refreshReports]);
+  useEffect(() => {
+    refreshReports();
+    // A reporter filing from the public form is a second tab over the same
+    // database. Without this the responder would have to reload to see it.
+    return onReportsChanged(refreshReports);
+  }, [refreshReports]);
 
   /**
    * Everything time relative on screen is measured against this. In replay that
@@ -319,6 +339,12 @@ export default function App({ onExit }: { onExit?: () => void }) {
   );
 
   const situationRef = useRef<Situation | null>(null);
+
+  /** The report currently open on the map, if any. */
+  const examined = useMemo(
+    () => reports.find((r) => r.id === activeReport) ?? null,
+    [reports, activeReport],
+  );
 
   /** Facilities narrowed to the scope the operator has chosen. */
   const scopedFacilities = useMemo(() => {
@@ -351,7 +377,7 @@ export default function App({ onExit }: { onExit?: () => void }) {
             : weather,
         facilities: scopedFacilities,
       }),
-    [point, visibleAlerts, weather, scopedFacilities, mode, injection],
+    [point, visibleAlerts, weather, scopedFacilities, mode, injection, examined],
   );
 
   situationRef.current = situation;
@@ -378,6 +404,8 @@ export default function App({ onExit }: { onExit?: () => void }) {
         weatherScore: s.weatherScore.score,
         exposureScore: s.exposure.score,
         status: 'new',
+        // Five miles is about what a sighting from a road covers.
+        radiusMiles: 5,
         replaySlug: mode === 'replay' ? (replay?.slug ?? null) : null,
       };
       await saveReport(report);
@@ -400,6 +428,25 @@ export default function App({ onExit }: { onExit?: () => void }) {
   const handleDelete = useCallback(
     async (id: string) => {
       await deleteReport(id);
+      refreshReports();
+    },
+    [refreshReports],
+  );
+
+  const openReport = useCallback(
+    (r: StoredReport) => {
+      setActiveReport(r.id);
+      setPoint({ lat: r.lat, lon: r.lon });
+      const pad = Math.max(0.08, r.radiusMiles / 55);
+      setFitBounds([r.lon - pad * 1.3, r.lat - pad, r.lon + pad * 1.3, r.lat + pad]);
+      setHighlighted(null);
+    },
+    [],
+  );
+
+  const handleRadius = useCallback(
+    async (id: string, miles: number) => {
+      await setReportRadius(id, miles);
       refreshReports();
     },
     [refreshReports],
@@ -531,7 +578,11 @@ export default function App({ onExit }: { onExit?: () => void }) {
           <MapView
             alerts={visibleAlerts}
             facilities={situation?.exposure.facilities ?? []}
-            reports={reports}
+            reports={
+              tornadoesOnly
+                ? reports.filter((r) => r.status === 'confirmed' || r.band === 'High')
+                : reports
+            }
             point={point}
             tracked={situation?.tracked ?? null}
             projectionMinutes={45}
@@ -541,6 +592,11 @@ export default function App({ onExit }: { onExit?: () => void }) {
             fitBounds={fitBounds}
             track={track}
             highlighted={highlighted}
+            examined={
+              examined
+                ? { lat: examined.lat, lon: examined.lon, radiusMiles: examined.radiusMiles, band: examined.band }
+                : null
+            }
             onSelectPoint={(p) => {
               setHighlighted(null);
               setPoint(p);
@@ -714,15 +770,19 @@ export default function App({ onExit }: { onExit?: () => void }) {
 
           <div className={['min-h-0 flex-1 overflow-y-auto scroll-slim', sheetOpen ? '' : 'hidden lg:block'].join(' ')}>
             {tab === 'situation' ? (
-              <SituationPanel situation={situation} now={clock} onFocusFacility={focusFacility} />
+              <SituationPanel
+                situation={situation}
+                now={clock}
+                placeLabel={placeLabel}
+                onFocusFacility={focusFacility}
+              />
             ) : tab === 'reports' ? (
               <ReportsPanel
                 reports={reports}
                 now={clock}
-                onFocus={(r) => {
-                  setPoint({ lat: r.lat, lon: r.lon });
-                  setFitBounds([r.lon - 0.15, r.lat - 0.12, r.lon + 0.15, r.lat + 0.12]);
-                }}
+                onFocus={openReport}
+                activeId={activeReport}
+                onRadius={(id, miles) => void handleRadius(id, miles)}
                 onStatus={handleStatus}
                 onDelete={(id) => void handleDelete(id)}
                 onExport={() => void handleExport()}

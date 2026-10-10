@@ -24,12 +24,16 @@ function ReportRow({
   onFocus,
   onStatus,
   onDelete,
+  onRadius,
+  active,
 }: {
   report: StoredReport;
   now: number;
   onFocus: (r: StoredReport) => void;
   onStatus: (id: string, status: ReportStatus) => void;
   onDelete: (id: string) => void;
+  onRadius: (id: string, miles: number) => void;
+  active: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -49,7 +53,13 @@ function ReportRow({
   }, [report.photo]);
 
   return (
-    <li className="rounded-lg border" style={{ borderColor: 'var(--border-soft)', background: 'var(--surface-raised)' }}>
+    <li
+      className="rounded-lg border"
+      style={{
+        borderColor: active ? 'var(--accent)' : 'var(--border-soft)',
+        background: active ? 'var(--surface-panel)' : 'var(--surface-raised)',
+      }}
+    >
       <div className="flex items-start gap-3 p-3">
         {thumb ? (
           <img src={thumb} alt="" className="size-12 shrink-0 rounded object-cover" />
@@ -97,7 +107,7 @@ function ReportRow({
               className="rounded px-2 py-1 text-[11px]"
               style={{ background: 'var(--surface-panel)', color: 'var(--text-secondary)' }}
             >
-              Show on map
+              {active ? 'On the map' : 'Open on map'}
             </button>
             <button
               type="button"
@@ -160,6 +170,32 @@ function ReportRow({
         </select>
       </div>
 
+      {active ? (
+        <div className="border-t px-3 py-2.5" style={{ borderColor: 'var(--border-soft)' }}>
+          <label className="block text-[11px]">
+            <span className="flex items-baseline justify-between">
+              <span style={{ color: 'var(--text-muted)' }}>Area to assess</span>
+              <span className="font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                {report.radiusMiles} mi
+              </span>
+            </span>
+            {/* A caller saying "somewhere north of town" is a different search
+                from one standing underneath it, and the responder is the one
+                who knows which. Widening this widens the real assessment, not
+                just the circle drawn on the map. */}
+            <input
+              type="range"
+              min={1}
+              max={25}
+              step={1}
+              value={report.radiusMiles}
+              onChange={(e) => onRadius(report.id, Number(e.target.value))}
+              className="mt-1 w-full accent-[var(--accent)]"
+            />
+          </label>
+        </div>
+      ) : null}
+
       {open ? (
         <div className="border-t px-3 py-3" style={{ borderColor: 'var(--border-soft)' }}>
           <ul className="space-y-1">
@@ -215,6 +251,8 @@ export default function ReportsPanel({
   onFocus,
   onStatus,
   onDelete,
+  onRadius,
+  activeId,
   onExport,
 }: {
   reports: StoredReport[];
@@ -222,6 +260,9 @@ export default function ReportsPanel({
   onFocus: (r: StoredReport) => void;
   onStatus: (id: string, status: ReportStatus) => void;
   onDelete: (id: string) => void;
+  onRadius: (id: string, miles: number) => void;
+  /** The report currently open on the map. */
+  activeId: string | null;
   onExport: () => void;
 }) {
   const sorted = [...reports].sort((a, b) => {
@@ -249,7 +290,16 @@ export default function ReportsPanel({
       {sorted.length ? (
         <ul className="space-y-2">
           {sorted.map((r) => (
-            <ReportRow key={r.id} report={r} now={now} onFocus={onFocus} onStatus={onStatus} onDelete={onDelete} />
+            <ReportRow
+              key={r.id}
+              report={r}
+              now={now}
+              onFocus={onFocus}
+              onStatus={onStatus}
+              onDelete={onDelete}
+              onRadius={onRadius}
+              active={r.id === activeId}
+            />
           ))}
         </ul>
       ) : (

@@ -86,10 +86,13 @@ function AlertCard({ alert, now }: { alert: Alert; now: number }) {
 export default function SituationPanel({
   situation,
   now,
+  placeLabel,
   onFocusFacility,
 }: {
   situation: Situation | null;
   now: number;
+  /** A human readable name for the point, resolved in the background. */
+  placeLabel?: string | null;
   onFocusFacility?: (id: string) => void;
 }) {
   if (!situation) {
@@ -107,7 +110,17 @@ export default function SituationPanel({
   return (
     <div>
       <Section title="Selected location">
-        <p className="font-mono text-xs" style={{ color: 'var(--text-secondary)' }}>
+        {/* The name first. Coordinates are exact, but a responder dispatches
+            to a place, not to a decimal. */}
+        {placeLabel ? (
+          <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+            {placeLabel}
+          </p>
+        ) : null}
+        <p
+          className="font-mono text-xs"
+          style={{ color: placeLabel ? 'var(--text-muted)' : 'var(--text-secondary)' }}
+        >
           {formatCoord(point.lat, point.lon)}
         </p>
       </Section>

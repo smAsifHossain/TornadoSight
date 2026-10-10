@@ -150,6 +150,8 @@ export default function ReporterPage({ onBack }: { onBack: () => void }) {
       weatherScore: situation.weatherScore.score,
       exposureScore: situation.exposure.score,
       status: 'new',
+      // Five miles is about what a sighting from a road covers.
+      radiusMiles: 5,
       replaySlug: null,
     };
 

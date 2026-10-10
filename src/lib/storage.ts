@@ -44,6 +44,12 @@ export interface StoredReport {
   weatherScore: number;
   exposureScore: number;
   status: ReportStatus;
+  /**
+   * How far around the sighting the responder wants assessed, in miles. A
+   * caller saying "somewhere north of town" is a different search than one
+   * standing under it, and the responder is the one who knows which.
+   */
+  radiusMiles: number;
   /** Set when the report came from Replay mode, so it is never mistaken for live. */
   replaySlug: string | null;
 }
@@ -54,6 +60,33 @@ export interface AuditEntry {
   at: number;
   action: string;
   detail: string;
+}
+
+/**
+ * Tell every other tab that the queue changed.
+ *
+ * A reporter filing from the public form and a responder watching the console
+ * are two tabs over one database. Without this the responder has to reload to
+ * see anything, which defeats the point of a queue.
+ */
+const CHANNEL = 'tornadosight.reports';
+const channel: BroadcastChannel | null =
+  typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CHANNEL);
+
+function announce() {
+  try {
+    channel?.postMessage('changed');
+  } catch {
+    /* a closed channel is not worth failing a save over */
+  }
+}
+
+/** Run `fn` whenever the report queue changes, in this tab or any other. */
+export function onReportsChanged(fn: () => void): () => void {
+  if (!channel) return () => undefined;
+  const handler = () => fn();
+  channel.addEventListener('message', handler);
+  return () => channel.removeEventListener('message', handler);
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -121,6 +154,14 @@ export async function setReportStatus(id: string, status: ReportStatus, who: str
     action: status,
     detail: who ? `Marked ${status} by ${who}` : `Marked ${status}`,
   });
+}
+
+/** Change how far around a sighting the responder wants assessed. */
+export async function setReportRadius(id: string, radiusMiles: number): Promise<void> {
+  const existing = await run<StoredReport | undefined>(REPORTS, 'readonly', (s) => s.get(id));
+  if (!existing) return;
+  await run(REPORTS, 'readwrite', (s) => s.put({ ...existing, radiusMiles }));
+  announce();
 }
 
 export async function deleteReport(id: string): Promise<void> {

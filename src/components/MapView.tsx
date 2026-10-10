@@ -175,6 +175,8 @@ export interface MapViewProps {
   track: { lat: number; lon: number }[];
   /** Facility id to single out from its neighbours. */
   highlighted: string | null;
+  /** The report being examined, drawn as the area it covers. */
+  examined: { lat: number; lon: number; radiusMiles: number; band: string } | null;
   onSelectPoint: (p: LatLon) => void;
   onSelectFacility: (id: string) => void;
   /** Fires as the radar loop advances, so the caption can say how old a frame is. */
@@ -182,6 +184,46 @@ export interface MapViewProps {
 }
 
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
+
+/**
+ * The area a report covers, as a real circle on the ground.
+ *
+ * Drawn in miles rather than as a fixed pixel radius, so zooming in does not
+ * quietly shrink the area a responder thinks they are searching.
+ */
+function reportAreaGeoJson(
+  examined: MapViewProps['examined'],
+): { ring: GeoJSON.FeatureCollection; centre: GeoJSON.FeatureCollection } {
+  if (!examined) return { ring: EMPTY, centre: EMPTY };
+  const origin = { lat: examined.lat, lon: examined.lon };
+  const coords: [number, number][] = [];
+  for (let deg = 0; deg <= 360; deg += 6) {
+    const p = destination(origin, deg, examined.radiusMiles);
+    coords.push([p.lon, p.lat]);
+  }
+  return {
+    ring: {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: { type: 'Polygon', coordinates: [coords] },
+          properties: { band: examined.band, radius: examined.radiusMiles },
+        },
+      ],
+    },
+    centre: {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [examined.lon, examined.lat] },
+          properties: { band: examined.band },
+        },
+      ],
+    },
+  };
+}
 
 function alertsToGeoJson(alerts: Alert[]): GeoJSON.FeatureCollection {
   return {
@@ -377,6 +419,7 @@ export default function MapView(props: MapViewProps) {
     fitBounds,
     track,
     highlighted,
+    examined,
     onSelectPoint,
     onSelectFacility,
     onRadarFrame,
@@ -443,6 +486,8 @@ export default function MapView(props: MapViewProps) {
         'trackdots',
         'facilities',
         'reports',
+        'reportarea',
+        'reportcentre',
         'picked',
       ]) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
@@ -657,6 +702,19 @@ export default function MapView(props: MapViewProps) {
 
       /* ---- reports and the selected point ---- */
       map.addLayer({
+        id: 'report-area-fill',
+        type: 'fill',
+        source: 'reportarea',
+        paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.1 },
+      });
+      map.addLayer({
+        id: 'report-area-line',
+        type: 'line',
+        source: 'reportarea',
+        paint: { 'line-color': '#38bdf8', 'line-width': 2, 'line-dasharray': [3, 2] },
+      });
+
+      map.addLayer({
         id: 'report-dot',
         type: 'circle',
         source: 'reports',
@@ -853,6 +911,9 @@ export default function MapView(props: MapViewProps) {
       setData('trackdots', history.dots);
       setData('facilities', showFacilities ? facilitiesToGeoJson(facilities, highlighted) : EMPTY);
       setData('reports', reportsToGeoJson(reports));
+      const area = reportAreaGeoJson(examined);
+      setData('reportarea', area.ring);
+      setData('reportcentre', area.centre);
       setData(
         'picked',
         point
@@ -867,7 +928,7 @@ export default function MapView(props: MapViewProps) {
     };
     if (readyRef.current) apply();
     else map.once('tornadosight.ready', apply);
-  }, [alerts, facilities, reports, point, tracked, projectionMinutes, showFacilities, track, highlighted, setData]);
+  }, [alerts, facilities, reports, point, tracked, projectionMinutes, showFacilities, track, highlighted, examined, setData]);
 
   /**
    * Run the radar loop.
