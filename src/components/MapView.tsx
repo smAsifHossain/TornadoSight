@@ -437,6 +437,8 @@ export default function MapView(props: MapViewProps) {
   const readyRef = useRef(false);
   const observerRef = useRef<ResizeObserver | null>(null);
   const fallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Stops the animation frame heartbeat when the map goes away. */
+  const heartbeatRef = useRef<(() => void) | null>(null);
   const rafRef = useRef<number | null>(null);
   const themeRef = useRef(theme);
   themeRef.current = theme;
@@ -786,24 +788,50 @@ export default function MapView(props: MapViewProps) {
     tryBuild();
 
     /**
-     * Keep trying for a while before declaring failure.
+     * A heartbeat that counts animation frames actually delivered.
      *
-     * A single check at five seconds reported the map as broken on a slow or
-     * backgrounded tab that went on to build itself perfectly a moment later,
-     * which is a red console error contradicted by the working map behind it.
-     * This retries quietly and only complains once, after a grace period long
-     * enough that the complaint means something.
+     * A backgrounded tab can have `requestAnimationFrame` frozen outright
+     * while still reporting `visibilityState` as "visible", and MapLibre runs
+     * style completion, its load and idle events, and all painting off those
+     * frames. With none arriving the map asks for its tiles and then stops
+     * half built, which is not a fault worth reporting: nothing is wrong and
+     * it resolves the moment the tab is looked at. Counting frames tells the
+     * difference between a map that failed and a map nobody is watching yet.
+     */
+    let framesSeen = 0;
+    let beating = true;
+    const beat = () => {
+      if (!beating) return;
+      framesSeen += 1;
+      requestAnimationFrame(beat);
+    };
+    requestAnimationFrame(beat);
+    heartbeatRef.current = () => {
+      beating = false;
+    };
+
+    /**
+     * Keep trying rather than declaring failure once and giving up.
+     *
+     * A single check at five seconds called the map broken on a slow tab that
+     * went on to build itself perfectly a moment later, which is a red error
+     * contradicted by the working map behind it. This retries quietly, and
+     * complains at most once, only after frames have actually been arriving
+     * long enough for the complaint to mean something.
      */
     let attempts = 0;
+    let complained = false;
     const retry = () => {
       tryBuild();
-      attempts += 1;
       if (built) return;
-      if (attempts < 6) {
-        fallbackRef.current = setTimeout(retry, 2500);
-        return;
+      // Only time spent with frames arriving counts against the budget.
+      if (framesSeen > 0) attempts += 1;
+      if (attempts >= 6 && !complained) {
+        complained = true;
+        console.error('[TornadoSight] the map layers could not be built', lastBuildError);
       }
-      console.error('[TornadoSight] the map layers could not be built', lastBuildError);
+      // Carry on regardless, so a tab that wakes up later still gets its map.
+      fallbackRef.current = setTimeout(retry, 2500);
     };
     fallbackRef.current = setTimeout(retry, 2500);
 
@@ -921,6 +949,8 @@ export default function MapView(props: MapViewProps) {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (fallbackRef.current) clearTimeout(fallbackRef.current);
+      heartbeatRef.current?.();
+      heartbeatRef.current = null;
       observerRef.current?.disconnect();
       observerRef.current = null;
       map.remove();

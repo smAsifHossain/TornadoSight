@@ -9,6 +9,19 @@
         "dev"
       ],
       "port": 5178
+    },
+    {
+      "name": "tornadosight-prod",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "preview",
+        "--",
+        "--port",
+        "4178",
+        "--strictPort"
+      ],
+      "port": 4178
     }
   ]
 }
